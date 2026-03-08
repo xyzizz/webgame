@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Orb Drift</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="game-shell" aria-label="Orb Drift launch bay">
+        <div class="frame-accent frame-accent--top" aria-hidden="true"></div>
+        <div class="frame-accent frame-accent--bottom" aria-hidden="true"></div>
+        <canvas id="game-canvas" width="960" height="540" aria-label="Orb Drift game canvas"></canvas>
+        <section class="menu-panel" id="menu-panel" data-state="menu" aria-live="polite">
+          <p class="menu-kicker" id="menu-kicker">Mission Brief</p>
+          <h1 class="menu-title" id="menu-title">Orb Drift</h1>
+          <p class="menu-subtitle" id="menu-subtitle">Sweep 100 sectors. Threat rises with each clear.</p>
+
+          <div class="brief-grid" aria-label="Mission stats">
+            <div class="brief-item">
+              <p class="brief-label">Sectors</p>
+              <p class="brief-value">100</p>
+            </div>
+            <div class="brief-item">
+              <p class="brief-label">Hull</p>
+              <p class="brief-value">5 HP</p>
+            </div>
+            <div class="brief-item">
+              <p class="brief-label">Pulse</p>
+              <p class="brief-value">0.7s CD</p>
+            </div>
+          </div>
+
+          <div class="controls-grid" aria-label="Controls">
+            <div class="control-chip"><kbd>Arrows</kbd><span>Drift</span></div>
+            <div class="control-chip"><kbd>Space</kbd><span>Pulse</span></div>
+            <div class="control-chip"><kbd>P / A</kbd><span>Pause</span></div>
+            <div class="control-chip"><kbd>R / B</kbd><span>Restart</span></div>
+            <div class="control-chip"><kbd>F</kbd><span>Fullscreen</span></div>
+          </div>
+
+          <button id="start-btn" type="button">Launch</button>
+        </section>
+      </section>
+    </main>
+    <script src="./game.js"></script>
+  </body>
+</html>
