@@ -6,12 +6,16 @@
   const menuTitle = document.getElementById("menu-title");
   const menuSubtitle = document.getElementById("menu-subtitle");
   const startBtn = document.getElementById("start-btn");
+  const controlsGrid = document.querySelector(".controls-grid");
+  const touchControls = document.getElementById("touch-controls");
+  const touchButtons = touchControls ? Array.from(touchControls.querySelectorAll("[data-code]")) : [];
 
   const world = { width: canvas.width, height: canvas.height };
   const keysDown = new Set();
   const pressedThisFrame = new Set();
   const FRAME_MS = 1000 / 60;
 
+  const PLAYER_SPEED = 260;
   const MAX_PLAYER_HP = 5;
   const GOAL_SHARDS = 3;
   const MAX_LEVEL = 100;
@@ -53,6 +57,23 @@
     };
   });
 
+  const MAX_BASE_ENEMY_SPEED = Math.max(...BASE_ENEMIES.map((enemy) => enemy.speed));
+  const MAX_ENEMY_SPEED_SCALE = PLAYER_SPEED / MAX_BASE_ENEMY_SPEED;
+  const DESKTOP_CONTROL_CHIPS = [
+    { key: "Arrows", label: "Drift" },
+    { key: "Space", label: "Pulse" },
+    { key: "P / A", label: "Pause" },
+    { key: "R / B", label: "Restart" },
+    { key: "F", label: "Fullscreen" },
+  ];
+  const TOUCH_CONTROL_CHIPS = [
+    { key: "D-pad", label: "Drift" },
+    { key: "PULSE", label: "Burst" },
+    { key: "PAUSE", label: "Pause" },
+    { key: "RESTART", label: "Retry" },
+    { key: "Tap Btns", label: "Touch" },
+  ];
+
   const state = {
     mode: "menu",
     level: 1,
@@ -62,6 +83,20 @@
     goal: GOAL_SHARDS,
     elapsed: 0,
     levelBannerTimer: 0,
+    damageFlash: 0,
+    pickupBursts: [],
+    clearFlash: 0,
+    clearLevel: 0,
+    milestoneFlash: 0,
+    milestoneLevel: 0,
+    milestoneLabel: "",
+    launchFlash: 0,
+    damageTaken: 0,
+    tutorialMoveHint: true,
+    tutorialPulseHint: true,
+    nearestEnemyDist: Infinity,
+    bestLevel: 1,
+    lastRun: null,
     player: makePlayer(),
     enemies: [],
     shards: [],
@@ -74,7 +109,7 @@
       vx: 0,
       vy: 0,
       r: 16,
-      speed: 260,
+      speed: PLAYER_SPEED,
       hp,
       invuln: 0,
       pulseTimer: 0,
@@ -83,7 +118,15 @@
   }
 
   function getSpeedScale() {
-    return 1 + (state.level - 1) * ENEMY_SPEED_STEP;
+    const scaled = 1 + (state.level - 1) * ENEMY_SPEED_STEP;
+    return Math.min(scaled, MAX_ENEMY_SPEED_SCALE);
+  }
+
+  function getNextMilestoneLevel(level) {
+    if (level >= state.maxLevel) return state.maxLevel;
+    if (level < 2) return Math.min(state.maxLevel, 2);
+    if (level % 10 === 0) return Math.min(state.maxLevel, level + 10);
+    return Math.min(state.maxLevel, Math.ceil(level / 10) * 10);
   }
 
   function buildLevelEnemies() {
@@ -95,7 +138,7 @@
       vx: 0,
       vy: 0,
       r: enemy.r,
-      speed: Math.round(enemy.speed * speedScale * 100) / 100,
+      speed: Math.min(PLAYER_SPEED, Math.round(enemy.speed * speedScale * 100) / 100),
       hp: enemy.hp,
     }));
   }
@@ -110,26 +153,54 @@
     state.goal = GOAL_SHARDS;
     state.enemies = buildLevelEnemies();
     state.shards = buildLevelShards();
+    state.nearestEnemyDist = Infinity;
 
     if (newRun) {
       state.player = makePlayer();
+      state.launchFlash = 0.95;
     } else {
       state.player = makePlayer(MAX_PLAYER_HP);
     }
 
     state.levelBannerTimer = 1;
+    if (!newRun && (state.level === 2 || state.level % 10 === 0)) {
+      state.milestoneFlash = 1.8;
+      state.milestoneLevel = state.level;
+      state.milestoneLabel = state.level === 2 ? "Checkpoint Sector 2" : `Milestone Sector ${state.level}`;
+    }
   }
 
   function showMenu(show) {
     menuPanel.classList.toggle("hidden", !show);
+    syncTouchControls();
+  }
+
+  function hasTouchUi() {
+    return window.matchMedia("(pointer: coarse)").matches || window.innerWidth <= 820;
+  }
+
+  function renderControlChips() {
+    if (!controlsGrid) return;
+    const chips = hasTouchUi() ? TOUCH_CONTROL_CHIPS : DESKTOP_CONTROL_CHIPS;
+    controlsGrid.innerHTML = chips
+      .map((chip) => `<div class="control-chip"><kbd>${chip.key}</kbd><span>${chip.label}</span></div>`)
+      .join("");
+  }
+
+  function syncTouchControls() {
+    if (!touchControls) return;
+    const canPlay = state.mode === "playing" || state.mode === "paused";
+    touchControls.classList.toggle("visible", hasTouchUi() && canPlay);
   }
 
   function setMenuVisualState(mode) {
+    const bestSuffix = state.bestLevel > 1 ? ` Best sector: ${state.bestLevel}.` : "";
+    const summary = state.lastRun ? `Reached Sector ${state.lastRun.level} · ${state.lastRun.totalScore} shards · ${state.lastRun.elapsed.toFixed(1)}s` : "";
     if (mode === "win") {
       menuPanel.dataset.state = "win";
       menuKicker.textContent = "Run Complete";
       menuTitle.textContent = "Sector Chain Complete";
-      menuSubtitle.textContent = "All sectors stabilized. Navigation lane secure.";
+      menuSubtitle.textContent = summary ? `${summary}.${bestSuffix}` : `All sectors stabilized. Navigation lane secure.${bestSuffix}`;
       startBtn.textContent = "Run Again";
       return;
     }
@@ -137,14 +208,20 @@
       menuPanel.dataset.state = "lose";
       menuKicker.textContent = "Signal Lost";
       menuTitle.textContent = "Hull Breach";
-      menuSubtitle.textContent = "Drone pressure broke the hull frame. Relaunch and retry.";
+      if (state.lastRun) {
+        const nextTarget = Math.min(state.maxLevel, Math.max(2, state.lastRun.level + 1));
+        const tip = state.lastRun.totalScore === 0 ? "Tip: pulse when drones stack on your lane." : "Tip: chain shards early, then pulse through pressure.";
+        menuSubtitle.textContent = `${summary}. Impacts taken: ${state.lastRun.damageTaken}. Next target: Sector ${nextTarget}. ${tip}${bestSuffix}`;
+      } else {
+        menuSubtitle.textContent = `Drone pressure broke the hull frame. Relaunch and retry.${bestSuffix}`;
+      }
       startBtn.textContent = "Retry";
       return;
     }
     menuPanel.dataset.state = "menu";
     menuKicker.textContent = "Mission Brief";
     menuTitle.textContent = "Orb Drift";
-    menuSubtitle.textContent = "Sweep 100 sectors. Threat rises every clear.";
+    menuSubtitle.textContent = `Sweep 100 sectors. Threat rises every clear.${bestSuffix}`;
     startBtn.textContent = "Launch";
   }
 
@@ -153,15 +230,28 @@
     state.level = 1;
     state.totalScore = 0;
     state.elapsed = 0;
+    state.damageTaken = 0;
+    state.tutorialMoveHint = true;
+    state.tutorialPulseHint = true;
     setMenuVisualState("menu");
     showMenu(false);
     spawnLevel(true);
+    syncTouchControls();
   }
 
   function endRun(mode) {
+    state.bestLevel = Math.max(state.bestLevel, state.level);
+    state.lastRun = {
+      mode,
+      level: state.level,
+      totalScore: state.totalScore,
+      elapsed: state.elapsed,
+      damageTaken: state.damageTaken,
+    };
     state.mode = mode;
     setMenuVisualState(mode);
     showMenu(true);
+    syncTouchControls();
   }
 
   function toggleFullscreen() {
@@ -226,6 +316,9 @@
     const dir = keyToDirection();
     player.vx = dir.dx * player.speed;
     player.vy = dir.dy * player.speed;
+    if (state.tutorialMoveHint && (Math.abs(player.vx) > 0 || Math.abs(player.vy) > 0)) {
+      state.tutorialMoveHint = false;
+    }
     player.x += player.vx * dt;
     player.y += player.vy * dt;
     clampEntity(player);
@@ -235,11 +328,16 @@
       player.pulseTimer = 0.2;
       applyPulseAttack();
     }
+    if (state.tutorialPulseHint && (pressedThisFrame.has("Space") || player.pulseCooldown > 0)) {
+      state.tutorialPulseHint = false;
+    }
 
+    let nearestEnemyDist = Infinity;
     for (const enemy of state.enemies) {
       const dx = player.x - enemy.x;
       const dy = player.y - enemy.y;
       const dist = Math.hypot(dx, dy) || 1;
+      nearestEnemyDist = Math.min(nearestEnemyDist, dist);
       const nx = dx / dist;
       const ny = dy / dist;
 
@@ -252,21 +350,27 @@
       const collisionDist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
       if (collisionDist <= enemy.r + player.r && player.invuln <= 0) {
         player.hp -= 1;
+        state.damageTaken += 1;
         player.invuln = 0.95;
+        state.damageFlash = 0.22;
       }
     }
+    state.nearestEnemyDist = nearestEnemyDist;
 
     state.shards = state.shards.filter((shard) => {
       const dist = Math.hypot(shard.x - player.x, shard.y - player.y);
       if (dist <= shard.r + player.r) {
         state.score += 1;
         state.totalScore += 1;
+        state.pickupBursts.push({ x: shard.x, y: shard.y, timer: 0.46 });
         return false;
       }
       return true;
     });
 
     if (state.score >= state.goal) {
+      state.clearFlash = 0.52;
+      state.clearLevel = state.level;
       if (state.level >= state.maxLevel) {
         endRun("win");
       } else {
@@ -282,6 +386,13 @@
   }
 
   function update(dt) {
+    state.damageFlash = Math.max(0, state.damageFlash - dt);
+    state.clearFlash = Math.max(0, state.clearFlash - dt);
+    state.milestoneFlash = Math.max(0, state.milestoneFlash - dt);
+    state.launchFlash = Math.max(0, state.launchFlash - dt);
+    state.pickupBursts = state.pickupBursts
+      .map((burst) => ({ ...burst, timer: burst.timer - dt }))
+      .filter((burst) => burst.timer > 0);
     if (state.mode === "playing") {
       updatePlaying(dt);
     }
@@ -416,6 +527,7 @@
 
   function drawPlayer() {
     const player = state.player;
+    const t = performance.now() * 0.001;
     const visible = player.invuln <= 0 || Math.floor(player.invuln * 15) % 2 === 0;
     if (visible) {
       const playerGradient = ctx.createLinearGradient(player.x - player.r, player.y - player.r, player.x + player.r, player.y + player.r);
@@ -451,6 +563,23 @@
       ctx.beginPath();
       ctx.arc(player.x, player.y, 120 * (1 - ratio * 0.18), 0, Math.PI * 2);
       ctx.stroke();
+    } else if (player.pulseCooldown <= 0) {
+      const alpha = 0.15 + ((Math.sin(t * 6) + 1) * 0.5) * 0.18;
+      ctx.strokeStyle = `rgba(126, 238, 255, ${alpha})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r + 7, 0, Math.PI * 2);
+      ctx.stroke();
+
+      const rangeAlpha = state.nearestEnemyDist < 170 ? 0.28 : 0.16;
+      ctx.save();
+      ctx.setLineDash([8, 7]);
+      ctx.strokeStyle = `rgba(116, 211, 255, ${rangeAlpha})`;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, 120, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
@@ -503,8 +632,9 @@
     const player = state.player;
     const baseX = 16;
     const baseY = 14;
+    const hpAccent = player.hp <= 2 ? "rgba(255, 138, 162, 0.95)" : "rgba(104, 236, 255, 0.92)";
     const modules = [
-      { label: "HP", value: `${player.hp}/${MAX_PLAYER_HP}`, width: 122, accent: "rgba(104, 236, 255, 0.92)" },
+      { label: "HP", value: `${player.hp}/${MAX_PLAYER_HP}`, width: 122, accent: hpAccent },
       { label: "LEVEL", value: `${state.level}/${state.maxLevel}`, width: 166, accent: "rgba(99, 175, 255, 0.92)" },
       { label: "SHARDS", value: `${state.score}/${state.goal}`, width: 152, accent: "rgba(95, 241, 227, 0.9)" },
       { label: "THREAT", value: `x${getSpeedScale().toFixed(2)}`, width: 152, accent: "rgba(255, 188, 112, 0.92)" },
@@ -540,9 +670,69 @@
     ctx.fillStyle = "#f8fcff";
     ctx.fillText(`${state.elapsed.toFixed(1)}s`, pulsePanelX + 126, baseY + 44);
 
+    const cooldownProgress = Math.max(0, Math.min(1, 1 - player.pulseCooldown / 0.7));
+    const barX = pulsePanelX + 13;
+    const barY = baseY + 48;
+    const barW = 208;
+    ctx.fillStyle = "rgba(41, 76, 106, 0.55)";
+    ctx.fillRect(barX, barY, barW, 4);
+    ctx.fillStyle = player.pulseCooldown <= 0 ? "#8ff4ff" : "#7db9ff";
+    ctx.fillRect(barX, barY, barW * cooldownProgress, 4);
+
     ctx.font = "700 11px 'Avenir Next', 'Trebuchet MS', sans-serif";
-    ctx.fillStyle = "rgba(229, 244, 255, 0.9)";
+    ctx.fillStyle = "rgba(236, 248, 255, 0.98)";
     ctx.fillText(`TOTAL SHARDS ${state.totalScore}`, baseX + 4, baseY + 72);
+
+    const nextMilestone = getNextMilestoneLevel(state.level);
+    const sectorsToMilestone = Math.max(0, nextMilestone - state.level);
+    drawRoundedPanel(baseX + 176, baseY + 59, 248, 16, 6);
+    ctx.fillStyle = "rgba(8, 28, 50, 0.46)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(88, 176, 224, 0.54)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = "rgba(149, 240, 255, 0.98)";
+    ctx.fillText(`MILESTONE S${nextMilestone} · ${sectorsToMilestone} TO GO`, baseX + 184, baseY + 72);
+
+    const remainingShards = Math.max(0, state.goal - state.score);
+    const objectiveX = 16;
+    const objectiveY = world.height - 52;
+    const objectiveW = 420;
+    const objectiveH = 30;
+    ctx.fillStyle = "rgba(9, 25, 48, 0.55)";
+    drawRoundedPanel(objectiveX, objectiveY, objectiveW, objectiveH, 10);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(103, 195, 239, 0.52)";
+    ctx.lineWidth = 1.2;
+    drawRoundedPanel(objectiveX, objectiveY, objectiveW, objectiveH, 10);
+    ctx.stroke();
+
+    const progressX = objectiveX + 9;
+    const progressY = objectiveY + objectiveH - 8;
+    const progressW = objectiveW - 18;
+    ctx.fillStyle = "rgba(40, 71, 99, 0.58)";
+    ctx.fillRect(progressX, progressY, progressW, 3);
+    ctx.fillStyle = "#67e6f6";
+    ctx.fillRect(progressX, progressY, progressW * (state.score / state.goal), 3);
+
+    ctx.fillStyle = "#edf8ff";
+    ctx.font = "700 12px 'Avenir Next', 'Trebuchet MS', sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(`Objective: collect ${remainingShards} more shard${remainingShards === 1 ? "" : "s"} to clear this sector`, objectiveX + 10, objectiveY + 19);
+
+    if (state.nearestEnemyDist < 165) {
+      const warningX = world.width - 282;
+      const warningY = world.height - 48;
+      drawRoundedPanel(warningX, warningY, 266, 26, 9);
+      ctx.fillStyle = state.nearestEnemyDist < 110 ? "rgba(107, 20, 39, 0.64)" : "rgba(114, 70, 16, 0.56)";
+      ctx.fill();
+      ctx.strokeStyle = state.nearestEnemyDist < 110 ? "rgba(255, 132, 157, 0.82)" : "rgba(255, 197, 125, 0.78)";
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.fillStyle = "#f7fbff";
+      ctx.font = "700 11px 'Avenir Next', 'Trebuchet MS', sans-serif";
+      ctx.fillText(`PROXIMITY ALERT · ${Math.round(state.nearestEnemyDist)}px`, warningX + 10, warningY + 17);
+    }
 
     if (state.mode === "paused") {
       ctx.fillStyle = "rgba(8, 23, 43, 0.45)";
@@ -637,7 +827,13 @@
     }
 
     if (state.mode === "lose") {
-      ctx.fillStyle = "rgba(65, 18, 37, 0.28)";
+      ctx.fillStyle = "rgba(58, 10, 32, 0.44)";
+      ctx.fillRect(0, 0, world.width, world.height);
+
+      const vignette = ctx.createRadialGradient(world.width * 0.5, world.height * 0.52, 120, world.width * 0.5, world.height * 0.52, world.width * 0.78);
+      vignette.addColorStop(0, "rgba(255, 106, 143, 0.08)");
+      vignette.addColorStop(1, "rgba(49, 8, 22, 0.5)");
+      ctx.fillStyle = vignette;
       ctx.fillRect(0, 0, world.width, world.height);
 
       ctx.save();
@@ -653,6 +849,144 @@
     }
   }
 
+  function drawFeedbackLayers() {
+    if (state.damageFlash <= 0) {
+      // continue for pickup bursts
+    } else {
+      const alpha = Math.min(0.28, state.damageFlash * 0.9);
+      const hurtGradient = ctx.createRadialGradient(world.width / 2, world.height / 2, 40, world.width / 2, world.height / 2, world.width * 0.8);
+      hurtGradient.addColorStop(0, `rgba(255, 96, 125, ${alpha * 0.15})`);
+      hurtGradient.addColorStop(1, `rgba(255, 64, 106, ${alpha})`);
+      ctx.fillStyle = hurtGradient;
+      ctx.fillRect(0, 0, world.width, world.height);
+
+      ctx.strokeStyle = `rgba(255, 173, 193, ${alpha + 0.16})`;
+      ctx.lineWidth = 8;
+      ctx.strokeRect(4, 4, world.width - 8, world.height - 8);
+    }
+
+    for (const burst of state.pickupBursts) {
+      const ratio = burst.timer / 0.46;
+      const radius = 22 + (1 - ratio) * 34;
+      const alpha = Math.max(0, ratio * 0.8);
+      ctx.strokeStyle = `rgba(117, 240, 255, ${alpha})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(burst.x, burst.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = `rgba(221, 251, 255, ${alpha})`;
+      ctx.font = "700 14px 'Avenir Next', 'Trebuchet MS', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("+1", burst.x, burst.y - 24 - (1 - ratio) * 16);
+    }
+
+    if (state.clearFlash > 0) {
+      const ratio = state.clearFlash / 0.52;
+      const alpha = Math.min(0.24, ratio * 0.24);
+      const sweep = ctx.createLinearGradient(0, 0, world.width, world.height);
+      sweep.addColorStop(0, `rgba(96, 247, 220, ${alpha})`);
+      sweep.addColorStop(1, `rgba(113, 200, 255, ${alpha * 0.86})`);
+      ctx.fillStyle = sweep;
+      ctx.fillRect(0, 0, world.width, world.height);
+
+      ctx.fillStyle = `rgba(229, 255, 251, ${Math.min(1, ratio * 1.4)})`;
+      ctx.font = "700 28px 'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(`Sector ${state.clearLevel} Cleared`, world.width / 2, world.height * 0.42);
+    }
+
+    if (state.milestoneFlash > 0) {
+      const ratio = state.milestoneFlash / 1.8;
+      ctx.fillStyle = `rgba(255, 215, 128, ${0.1 * ratio})`;
+      ctx.fillRect(0, 0, world.width, world.height);
+      ctx.fillStyle = `rgba(255, 244, 206, ${Math.min(1, ratio * 1.3)})`;
+      ctx.font = "700 34px 'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(state.milestoneLabel || `Milestone Sector ${state.milestoneLevel}`, world.width / 2, world.height * 0.33);
+    }
+
+    if (state.mode === "playing" && state.launchFlash > 0) {
+      const ratio = state.launchFlash / 0.95;
+      const alpha = Math.min(1, ratio * 1.2);
+      const sweep = ctx.createLinearGradient(0, 0, world.width, 0);
+      sweep.addColorStop(0, `rgba(87, 218, 255, ${0.16 * alpha})`);
+      sweep.addColorStop(0.5, `rgba(122, 172, 255, ${0.11 * alpha})`);
+      sweep.addColorStop(1, "rgba(122, 172, 255, 0)");
+      ctx.fillStyle = sweep;
+      ctx.fillRect(0, 0, world.width, world.height);
+
+      drawRoundedPanel(world.width / 2 - 194, world.height * 0.37 - 34, 388, 76, 14);
+      ctx.fillStyle = `rgba(8, 27, 50, ${0.24 * alpha})`;
+      ctx.fill();
+      ctx.strokeStyle = `rgba(122, 217, 247, ${0.46 * alpha})`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.fillStyle = `rgba(233, 247, 255, ${alpha})`;
+      ctx.font = "700 28px 'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Launch Vector Locked", world.width / 2, world.height * 0.37);
+
+      ctx.font = "700 14px 'Avenir Next', 'Trebuchet MS', sans-serif";
+      ctx.fillStyle = `rgba(222, 243, 255, ${0.9 * alpha})`;
+      ctx.fillText(`Collect ${state.goal} shards to clear Sector ${state.level}`, world.width / 2, world.height * 0.37 + 26);
+    }
+
+    if (state.mode === "playing" && state.level === 1 && state.elapsed < 14 && state.nearestEnemyDist >= 165) {
+      const tips = [];
+      if (state.tutorialMoveHint) {
+        tips.push(hasTouchUi() ? "Use D-pad to drift through shards" : "Use Arrow keys to drift through shards");
+      }
+      if (state.tutorialPulseHint) {
+        tips.push(hasTouchUi() ? "Tap PULSE when drones close in" : "Press Space when drones close in");
+      }
+      if (tips.length > 0) {
+        const boxW = 342;
+        const boxH = 26 + tips.length * 18;
+        const boxX = world.width - boxW - 16;
+        const boxY = world.height - boxH - 18;
+        drawRoundedPanel(boxX, boxY, boxW, boxH, 11);
+        ctx.fillStyle = "rgba(8, 27, 49, 0.58)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(106, 201, 244, 0.6)";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
+        ctx.fillStyle = "rgba(229, 246, 255, 0.95)";
+        ctx.font = "700 12px 'Avenir Next', 'Trebuchet MS', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText("COMBAT TIPS", boxX + 12, boxY + 16);
+        ctx.font = "700 11px 'Avenir Next', 'Trebuchet MS', sans-serif";
+        for (let i = 0; i < tips.length; i += 1) {
+          ctx.fillText(`• ${tips[i]}`, boxX + 12, boxY + 34 + i * 16);
+        }
+      }
+    }
+
+    if (state.mode === "playing" && state.nearestEnemyDist < 115) {
+      const pressure = Math.max(0, (115 - state.nearestEnemyDist) / 115);
+      const ringAlpha = 0.12 + pressure * 0.28;
+      const radius = state.player.r + 20 + pressure * 18;
+      ctx.strokeStyle = `rgba(255, 135, 154, ${ringAlpha})`;
+      ctx.lineWidth = 2.6;
+      ctx.beginPath();
+      ctx.arc(state.player.x, state.player.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    if (state.mode === "playing" && state.player.hp <= 2) {
+      const urgency = (3 - state.player.hp) / 2;
+      const pulse = (Math.sin(performance.now() * 0.01) + 1) * 0.5;
+      const alpha = Math.min(0.26, 0.1 + urgency * 0.12 + pulse * 0.06);
+      const edge = ctx.createRadialGradient(world.width / 2, world.height / 2, world.height * 0.18, world.width / 2, world.height / 2, world.width * 0.72);
+      edge.addColorStop(0, "rgba(255, 98, 132, 0)");
+      edge.addColorStop(1, `rgba(255, 79, 120, ${alpha})`);
+      ctx.fillStyle = edge;
+      ctx.fillRect(0, 0, world.width, world.height);
+    }
+  }
+
   function render() {
     drawBackground();
     drawShards();
@@ -660,14 +994,16 @@
     drawPlayer();
     drawHud();
     drawOverlayText();
+    drawFeedbackLayers();
   }
 
   function resizeCanvasCss() {
     const isMobile = window.matchMedia("(max-width: 820px)").matches;
     const horizontalPadding = isMobile ? 20 : 44;
     const verticalPadding = isMobile ? 20 : 44;
+    const touchReserve = isMobile && hasTouchUi() && (state.mode === "playing" || state.mode === "paused") ? 184 : 0;
     const availW = Math.max(280, window.innerWidth - horizontalPadding);
-    const availH = Math.max(200, window.innerHeight - verticalPadding);
+    const availH = Math.max(200, window.innerHeight - verticalPadding - touchReserve);
 
     // Keep the canvas centered and fully visible: scale down for small viewports,
     // but do not upscale past the native 960x540 art size.
@@ -686,6 +1022,7 @@
       } else if (state.mode === "paused") {
         state.mode = "playing";
       }
+      syncTouchControls();
     }
 
     if (
@@ -725,9 +1062,45 @@
     keysDown.delete(event.code);
   });
 
-  window.addEventListener("resize", resizeCanvasCss);
+  window.addEventListener("resize", () => {
+    resizeCanvasCss();
+    renderControlChips();
+    syncTouchControls();
+  });
+  window.addEventListener("orientationchange", () => {
+    resizeCanvasCss();
+    renderControlChips();
+    syncTouchControls();
+  });
   document.addEventListener("fullscreenchange", resizeCanvasCss);
   startBtn.addEventListener("click", startGame);
+
+  for (const button of touchButtons) {
+    const code = button.dataset.code;
+    const tapOnly = button.dataset.tap === "1";
+    if (!code) continue;
+
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      button.classList.add("active");
+      if (!keysDown.has(code)) {
+        pressedThisFrame.add(code);
+      }
+      keysDown.add(code);
+      if (tapOnly) {
+        keysDown.delete(code);
+      }
+      handleGameplayHotkeys(code);
+    });
+
+    const release = () => {
+      button.classList.remove("active");
+      keysDown.delete(code);
+    };
+    button.addEventListener("pointerup", release);
+    button.addEventListener("pointercancel", release);
+    button.addEventListener("pointerleave", release);
+  }
 
   function gameLoop(now) {
     if (!gameLoop.lastNow) gameLoop.lastNow = now;
@@ -809,8 +1182,23 @@
 
   window.render_game_to_text = renderGameToText;
   window.advanceTime = advanceTime;
+  window.orbDriftDebug = {
+    forceWin: () => endRun("win"),
+    forceLose: () => endRun("lose"),
+    setPlayerHp: (hp) => {
+      const value = Math.max(0, Math.min(MAX_PLAYER_HP, Math.round(Number(hp) || 0)));
+      state.player.hp = value;
+    },
+    setLevel: (level) => {
+      if (state.mode !== "playing" && state.mode !== "paused") return;
+      state.level = Math.max(1, Math.min(state.maxLevel, Math.round(Number(level) || 1)));
+      spawnLevel(false);
+    },
+  };
 
   resizeCanvasCss();
+  renderControlChips();
+  syncTouchControls();
   render();
   window.requestAnimationFrame(gameLoop);
 })();

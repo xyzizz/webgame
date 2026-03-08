@@ -43,6 +43,20 @@
 
           <button id="start-btn" type="button">Launch</button>
         </section>
+
+        <section class="touch-controls" id="touch-controls" aria-label="Touch controls">
+          <div class="touch-dpad">
+            <button class="touch-btn touch-btn--up" data-code="ArrowUp" aria-label="Move up">▲</button>
+            <button class="touch-btn touch-btn--left" data-code="ArrowLeft" aria-label="Move left">◀</button>
+            <button class="touch-btn touch-btn--right" data-code="ArrowRight" aria-label="Move right">▶</button>
+            <button class="touch-btn touch-btn--down" data-code="ArrowDown" aria-label="Move down">▼</button>
+          </div>
+          <div class="touch-actions">
+            <button class="touch-btn touch-btn--action" data-code="Space" data-tap="1" aria-label="Pulse">PULSE</button>
+            <button class="touch-btn touch-btn--action" data-code="KeyP" data-tap="1" aria-label="Pause">PAUSE</button>
+            <button class="touch-btn touch-btn--action" data-code="KeyR" data-tap="1" aria-label="Restart">RESTART</button>
+          </div>
+        </section>
       </section>
     </main>
     <script src="./game.js"></script>

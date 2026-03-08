@@ -298,6 +298,90 @@ kbd {
   display: none;
 }
 
+.touch-controls {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 12px;
+  display: none;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.touch-controls.visible {
+  display: flex;
+}
+
+.touch-dpad {
+  position: relative;
+  width: 152px;
+  height: 152px;
+}
+
+.touch-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.touch-btn {
+  pointer-events: auto;
+  user-select: none;
+  touch-action: none;
+  border: 1px solid rgba(143, 221, 255, 0.6);
+  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(21, 52, 82, 0.72), rgba(28, 66, 104, 0.6));
+  color: #e8faff;
+  font: 700 0.95rem/1 var(--display-font);
+  box-shadow: 0 10px 18px rgba(8, 23, 44, 0.24), inset 0 1px 0 rgba(224, 247, 255, 0.2);
+}
+
+.touch-btn:active,
+.touch-btn.active {
+  transform: translateY(1px);
+  filter: brightness(1.18);
+}
+
+.touch-btn--up,
+.touch-btn--left,
+.touch-btn--right,
+.touch-btn--down {
+  position: absolute;
+  width: 50px;
+  height: 50px;
+  border-radius: 12px;
+  font-size: 1rem;
+}
+
+.touch-btn--up {
+  left: 51px;
+  top: 0;
+}
+
+.touch-btn--left {
+  left: 0;
+  top: 51px;
+}
+
+.touch-btn--right {
+  right: 0;
+  top: 51px;
+}
+
+.touch-btn--down {
+  left: 51px;
+  bottom: 0;
+}
+
+.touch-btn--action {
+  min-width: 104px;
+  height: 44px;
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+}
+
 @media (max-width: 980px) {
   .page {
     padding: 14px;
@@ -342,7 +426,7 @@ kbd {
   }
 
   #game-canvas {
-    width: min(100vw - 20px, 960px);
+    width: min(100vw - 12px, 960px);
     max-height: none;
   }
 
@@ -385,5 +469,54 @@ kbd {
   .control-chip span {
     font-size: 0.69rem;
     letter-spacing: 0.05em;
+  }
+
+  .touch-controls {
+    position: relative;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    width: min(100%, 960px);
+    margin-top: 6px;
+    padding: 0 4px 4px;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 14px;
+  }
+
+  .touch-dpad {
+    width: 152px;
+    height: 152px;
+  }
+
+  .touch-btn--up,
+  .touch-btn--left,
+  .touch-btn--right,
+  .touch-btn--down {
+    width: 50px;
+    height: 50px;
+    border-radius: 12px;
+  }
+
+  .touch-btn--up {
+    left: 51px;
+  }
+
+  .touch-btn--left {
+    top: 51px;
+  }
+
+  .touch-btn--right {
+    top: 51px;
+  }
+
+  .touch-btn--down {
+    left: 51px;
+  }
+
+  .touch-btn--action {
+    min-width: 108px;
+    height: 44px;
+    font-size: 0.74rem;
   }
 }
