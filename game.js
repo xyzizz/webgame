@@ -5,6 +5,8 @@
   const menuKicker = document.getElementById("menu-kicker");
   const menuTitle = document.getElementById("menu-title");
   const menuSubtitle = document.getElementById("menu-subtitle");
+  const upgradeOptions = document.getElementById("upgrade-options");
+  const menuUpgradeHint = document.getElementById("menu-upgrade-hint");
   const startBtn = document.getElementById("start-btn");
   const controlsGrid = document.querySelector(".controls-grid");
   const touchControls = document.getElementById("touch-controls");
@@ -17,14 +19,21 @@
 
   const PLAYER_SPEED = 260;
   const MAX_PLAYER_HP = 5;
-  const GOAL_SHARDS = 3;
-  const MAX_LEVEL = 100;
-  const LEVELS_PER_STAGE = 4;
-  const EARLY_STAGE_SPEED_STEP = 0.14;
-  const MID_STAGE_SPEED_STEP = 0.11;
+  const MAX_LEVEL = 12;
+  const LEVELS_PER_STAGE = 3;
+  const WAVE_BASE_DURATION = 18;
+  const WAVE_DURATION_STEP = 1.3;
+  const WAVE_MAX_DURATION = 35;
+  const WAVE_REWARD_TARGET = 3;
+  const BASE_ENEMY_TARGET = 2;
+  const MAX_ENEMIES = 10;
+  const EARLY_STAGE_SPEED_STEP = 0.12;
+  const MID_STAGE_SPEED_STEP = 0.1;
   const LATE_STAGE_SPEED_STEP = 0.08;
-  const MAX_ENEMIES = 9;
-  const LEVEL_ENTRY_GRACE = 0.85;
+  const LEVEL_ENTRY_GRACE = 1.25;
+  const BASE_PULSE_COOLDOWN = 0.7;
+  const BASE_PULSE_RADIUS = 120;
+  const BASE_PULSE_PUSH = 170;
 
   const ENEMY_ARCHETYPES = [
     { id: "E1", fallbackX: 300, fallbackY: 244, r: 15, speed: 95, hp: 1 },
@@ -93,6 +102,16 @@
   const SHARD_RISK_TARGETS = [192, 138, 102];
   const SHARD_ANGLE_MIN_SEPARATION = 0.42;
   const DEFAULT_DEBUG_SEED = 20260309;
+  const GOAL_SHARDS = WAVE_REWARD_TARGET;
+  const UPGRADE_CATALOG = [
+    { id: "thruster", name: "Vector Thruster", desc: "Move speed +12% next wave onward.", cost: 3 },
+    { id: "capacitor", name: "Pulse Capacitor", desc: "Pulse cooldown -0.08s.", cost: 2 },
+    { id: "resonator", name: "Pulse Resonator", desc: "Pulse radius +14.", cost: 2 },
+    { id: "alloy", name: "Hull Alloy", desc: "Max HP +1 and recover 1 HP.", cost: 3 },
+    { id: "salvage", name: "Magnet Rig", desc: "Core pickup range +12.", cost: 2 },
+    { id: "overdrive", name: "Pulse Overdrive", desc: "Pulse damage +1.", cost: 4 },
+    { id: "patch", name: "Field Patch", desc: "Recover 2 HP now.", cost: 0 },
+  ];
 
   function normalizeSeed(value) {
     if (!Number.isFinite(value)) return DEFAULT_DEBUG_SEED;
@@ -128,14 +147,22 @@
     levelBannerTimer: 0,
     levelEntryShield: 0,
     levelEntryShieldTotal: LEVEL_ENTRY_GRACE,
+    waveDuration: WAVE_BASE_DURATION,
+    waveTimer: WAVE_BASE_DURATION,
+    enemyTarget: BASE_ENEMY_TARGET,
+    enemySpawnInterval: 3.4,
+    enemySpawnTimer: 3.4,
+    rewardSpawnInterval: 5.2,
+    rewardSpawnTimer: 5.2,
+    waveTech: 0,
+    tech: 0,
+    upgradesOffered: [],
+    selectedUpgradeIndex: 0,
+    lastUpgradeLabel: "",
     damageFlash: 0,
     pickupBursts: [],
     clearFlash: 0,
     clearLevel: 0,
-    stageBonusFlash: 0,
-    stageBonusDelay: 0,
-    stageBonusPoints: 0,
-    stageBonusStage: 0,
     milestoneFlash: 0,
     milestoneLevel: 0,
     milestoneLabel: "",
@@ -153,6 +180,15 @@
     spawnDiagnostics: null,
     runSeed: DEFAULT_DEBUG_SEED,
     seedOverride: null,
+    liveRng: createRng(DEFAULT_DEBUG_SEED),
+    build: {
+      thruster: 0,
+      capacitor: 0,
+      resonator: 0,
+      alloy: 0,
+      salvage: 0,
+      overdrive: 0,
+    },
     player: makePlayer(),
     enemies: [],
     shards: [],
@@ -173,13 +209,64 @@
     };
   }
 
+  function getMaxPlayerHp() {
+    return MAX_PLAYER_HP + state.build.alloy;
+  }
+
+  function getPlayerSpeed() {
+    return PLAYER_SPEED * (1 + state.build.thruster * 0.12);
+  }
+
+  function getPulseCooldown() {
+    return Math.max(0.25, BASE_PULSE_COOLDOWN - state.build.capacitor * 0.08);
+  }
+
+  function getPulseRadius() {
+    return BASE_PULSE_RADIUS + state.build.resonator * 14;
+  }
+
+  function getPulseDamage() {
+    return 1 + state.build.overdrive;
+  }
+
+  function getPulsePush() {
+    return BASE_PULSE_PUSH + state.build.resonator * 12;
+  }
+
+  function getPickupAssistRadius() {
+    return state.build.salvage * 12;
+  }
+
+  function healPlayer(amount) {
+    state.player.hp = Math.min(getMaxPlayerHp(), state.player.hp + amount);
+  }
+
+  function syncPlayerBuildStats() {
+    state.player.speed = getPlayerSpeed();
+    state.player.hp = Math.min(state.player.hp, getMaxPlayerHp());
+  }
+
+  function getWaveDurationForLevel(level = state.level) {
+    return Math.min(WAVE_MAX_DURATION, WAVE_BASE_DURATION + (Math.max(1, level) - 1) * WAVE_DURATION_STEP);
+  }
+
+  function getEnemySpawnInterval(level = state.level) {
+    const stage = getStageForLevel(level);
+    return Math.max(1.2, 4.2 - (stage - 1) * 0.4 - Math.min(1.5, (level - 1) * 0.07));
+  }
+
+  function getRewardSpawnInterval(level = state.level) {
+    const stage = getStageForLevel(level);
+    return Math.max(2.6, 5.4 - Math.min(2.2, (stage - 1) * 0.32));
+  }
+
   function getStageForLevel(level = state.level) {
     return Math.floor((Math.max(1, level) - 1) / LEVELS_PER_STAGE) + 1;
   }
 
   function getEnemyCountForLevel(level = state.level) {
     const stage = getStageForLevel(level);
-    return Math.min(MAX_ENEMIES, ENEMY_ARCHETYPES.length + (stage - 1));
+    return Math.min(MAX_ENEMIES, BASE_ENEMY_TARGET + (stage - 1));
   }
 
   function getLevelsToNextStage(level = state.level) {
@@ -229,9 +316,9 @@
 
   function getEntryShieldDuration(level = state.level) {
     const stage = getStageForLevel(level);
-    const softened = LEVEL_ENTRY_GRACE - Math.max(0, stage - 1) * 0.04;
+    const softened = LEVEL_ENTRY_GRACE - Math.max(0, stage - 1) * 0.05;
     const pressureComp = getEnemyCountForLevel(level) >= 8 ? 0.05 : 0;
-    return Math.max(0.58, Math.min(LEVEL_ENTRY_GRACE, softened + pressureComp));
+    return Math.max(0.9, Math.min(LEVEL_ENTRY_GRACE, softened + pressureComp));
   }
 
   function randomBetween(rng, min, max) {
@@ -264,13 +351,22 @@
     return normalizeSeed(Math.floor(Math.random() * 4294967295));
   }
 
-  function makeLevelEnemyRng() {
-    const levelSalt = Math.imul(state.level + 37, 2654435761);
+  function makeWaveRng(salt) {
+    const levelSalt = Math.imul(state.level + salt, 2654435761);
     return createRng(mixSeed(state.runSeed, levelSalt));
+  }
+
+  function makeLevelEnemyRng() {
+    return makeWaveRng(37);
   }
 
   function makeLevelShardRng() {
     const levelSalt = Math.imul(state.level + 79, 1597334677);
+    return createRng(mixSeed(state.runSeed, levelSalt));
+  }
+
+  function makeUpgradeRng() {
+    const levelSalt = Math.imul(state.level + 113, 1103515245);
     return createRng(mixSeed(state.runSeed, levelSalt));
   }
 
@@ -322,46 +418,60 @@
     return null;
   }
 
+  function buildEnemyUnit(index, speedScale, rng, playerSpawn, existingEnemies, totalEnemies) {
+    const baseEnemy = ENEMY_ARCHETYPES[index % ENEMY_ARCHETYPES.length];
+    const tier = Math.floor(index / ENEMY_ARCHETYPES.length);
+    const fallbackAngle = (index / Math.max(1, totalEnemies)) * Math.PI * 2;
+    const fallbackRadius = 34 + tier * 22;
+    const enemy = {
+      id: `E${index + 1}`,
+      fallbackX: Math.max(
+        baseEnemy.r,
+        Math.min(world.width - baseEnemy.r, baseEnemy.fallbackX + Math.cos(fallbackAngle) * fallbackRadius)
+      ),
+      fallbackY: Math.max(
+        baseEnemy.r,
+        Math.min(world.height - baseEnemy.r, baseEnemy.fallbackY + Math.sin(fallbackAngle) * fallbackRadius)
+      ),
+      r: baseEnemy.r,
+      speed: baseEnemy.speed * Math.max(0.8, 1 - tier * 0.08),
+      hp: Math.min(4, baseEnemy.hp + (tier > 0 ? 1 : 0)),
+    };
+    const point = pickEnemySpawn(rng, playerSpawn, existingEnemies, enemy.r, totalEnemies);
+    return {
+      id: enemy.id,
+      x: point ? point.x : enemy.fallbackX,
+      y: point ? point.y : enemy.fallbackY,
+      vx: 0,
+      vy: 0,
+      r: enemy.r,
+      speed: Math.min(getPlayerSpeed(), Math.round(enemy.speed * speedScale * 100) / 100),
+      hp: enemy.hp,
+    };
+  }
+
   function buildLevelEnemies() {
     const speedScale = getSpeedScale();
     const rng = makeLevelEnemyRng();
-    const playerSpawn = makePlayer();
+    const playerSpawn = makePlayer(getMaxPlayerHp());
     const enemyCount = getEnemyCountForLevel();
     const spawned = [];
 
     for (let index = 0; index < enemyCount; index += 1) {
-      const baseEnemy = ENEMY_ARCHETYPES[index % ENEMY_ARCHETYPES.length];
-      const tier = Math.floor(index / ENEMY_ARCHETYPES.length);
-      const fallbackAngle = (index / enemyCount) * Math.PI * 2;
-      const fallbackRadius = 34 + tier * 20;
-      const enemy = {
-        id: `E${index + 1}`,
-        fallbackX: Math.max(
-          baseEnemy.r,
-          Math.min(world.width - baseEnemy.r, baseEnemy.fallbackX + Math.cos(fallbackAngle) * fallbackRadius)
-        ),
-        fallbackY: Math.max(
-          baseEnemy.r,
-          Math.min(world.height - baseEnemy.r, baseEnemy.fallbackY + Math.sin(fallbackAngle) * fallbackRadius)
-        ),
-        r: baseEnemy.r,
-        speed: baseEnemy.speed * Math.max(0.82, 1 - tier * 0.08),
-        hp: Math.min(3, baseEnemy.hp + (tier > 0 ? 1 : 0)),
-      };
-      const point = pickEnemySpawn(rng, playerSpawn, spawned, enemy.r, enemyCount);
-      spawned.push({
-        id: enemy.id,
-        x: point ? point.x : enemy.fallbackX,
-        y: point ? point.y : enemy.fallbackY,
-        vx: 0,
-        vy: 0,
-        r: enemy.r,
-        speed: Math.min(PLAYER_SPEED, Math.round(enemy.speed * speedScale * 100) / 100),
-        hp: enemy.hp,
-      });
+      spawned.push(buildEnemyUnit(index, speedScale, rng, playerSpawn, spawned, enemyCount));
     }
 
     return spawned;
+  }
+
+  function spawnReinforcementEnemy() {
+    if (state.enemies.length >= state.enemyTarget) return;
+    const speedScale = getSpeedScale();
+    const rng = state.liveRng;
+    const index = Math.floor(rng() * 1024) % (state.enemyTarget + 1);
+    const playerAnchor = { x: state.player.x, y: state.player.y, r: state.player.r };
+    const enemy = buildEnemyUnit(index, speedScale, rng, playerAnchor, state.enemies, state.enemyTarget);
+    state.enemies.push(enemy);
   }
 
   function nearestEnemyDistance(point, enemies) {
@@ -450,14 +560,14 @@
     return best ? best.point : null;
   }
 
-  function buildLevelShards(enemies) {
+  function buildLevelShards(enemies, targetCount = state.goal) {
     const rng = makeLevelShardRng();
-    const playerSpawn = makePlayer();
+    const playerSpawn = makePlayer(getMaxPlayerHp());
     const shards = [];
     const riskTargets = getShardRiskTargets(state.level);
     const distanceBounds = getShardDistanceBounds(state.level);
 
-    for (let i = 0; i < GOAL_SHARDS; i += 1) {
+    for (let i = 0; i < targetCount; i += 1) {
       const targetEnemyDist = riskTargets[i % riskTargets.length];
       const candidate = pickShardSpawn(rng, playerSpawn, enemies, shards, targetEnemyDist, distanceBounds);
       if (!candidate) break;
@@ -465,28 +575,52 @@
       shards.push({ id: `S${i + 1}`, x: candidate.x, y: candidate.y, r: 8, value });
     }
 
-    if (shards.length === GOAL_SHARDS) {
+    if (shards.length === targetCount) {
       return shards;
     }
 
     const pattern = FALLBACK_SHARD_PATTERNS[(state.level - 1) % FALLBACK_SHARD_PATTERNS.length];
-    return pattern.map((shard, index) => ({ ...shard, value: Math.min(3, index + 1) }));
+    return pattern.slice(0, targetCount).map((shard, index) => ({ ...shard, value: Math.min(3, index + 1) }));
+  }
+
+  function spawnRewardCore() {
+    if (state.shards.length >= state.goal) return false;
+    const riskTargets = getShardRiskTargets(state.level);
+    const distanceBounds = getShardDistanceBounds(state.level);
+    const targetEnemyDist = riskTargets[Math.floor(state.liveRng() * riskTargets.length)];
+    const playerAnchor = { x: state.player.x, y: state.player.y, r: state.player.r };
+    const candidate = pickShardSpawn(state.liveRng, playerAnchor, state.enemies, state.shards, targetEnemyDist, distanceBounds);
+    if (!candidate) return false;
+    const value = targetEnemyDist <= 110 ? 3 : targetEnemyDist <= 150 ? 2 : 1;
+    state.shards.push({ id: `S${state.level}-${state.shards.length + 1}`, x: candidate.x, y: candidate.y, r: 8, value });
+    return true;
   }
 
   function spawnLevel(newRun) {
     state.score = 0;
-    state.goal = GOAL_SHARDS;
+    state.goal = WAVE_REWARD_TARGET;
+    state.waveTech = 0;
     state.sectorDamageTaken = 0;
+    state.waveDuration = getWaveDurationForLevel(state.level);
+    state.waveTimer = state.waveDuration;
+    state.enemyTarget = getEnemyCountForLevel(state.level);
+    state.enemySpawnInterval = getEnemySpawnInterval(state.level);
+    state.enemySpawnTimer = state.enemySpawnInterval * 0.58;
+    state.rewardSpawnInterval = getRewardSpawnInterval(state.level);
+    state.rewardSpawnTimer = state.rewardSpawnInterval * 0.72;
+    state.liveRng = makeWaveRng(211);
     state.enemies = buildLevelEnemies();
-    state.shards = buildLevelShards(state.enemies);
+    state.shards = buildLevelShards(state.enemies, state.goal);
     state.nearestEnemyDist = Infinity;
 
     if (newRun) {
-      state.player = makePlayer();
+      state.player = makePlayer(getMaxPlayerHp());
       state.launchFlash = 0.95;
     } else {
-      state.player = makePlayer(MAX_PLAYER_HP);
+      const carryHp = Math.max(1, Math.round(state.player.hp));
+      state.player = makePlayer(Math.min(getMaxPlayerHp(), carryHp + 1));
     }
+    syncPlayerBuildStats();
     state.levelEntryShieldTotal = getEntryShieldDuration(state.level);
     state.levelEntryShield = state.levelEntryShieldTotal;
     state.spawnDiagnostics = buildSpawnDiagnostics(state.player, state.enemies, state.shards);
@@ -528,19 +662,165 @@
     touchControls.classList.toggle("visible", hasTouchUi() && canPlay);
   }
 
+  function setStartButtonVisible(show) {
+    startBtn.classList.toggle("hidden-control", !show);
+    startBtn.disabled = !show;
+  }
+
+  function applyUpgradeById(id) {
+    if (id === "thruster") {
+      state.build.thruster += 1;
+      syncPlayerBuildStats();
+      return;
+    }
+    if (id === "capacitor") {
+      state.build.capacitor += 1;
+      return;
+    }
+    if (id === "resonator") {
+      state.build.resonator += 1;
+      return;
+    }
+    if (id === "alloy") {
+      state.build.alloy += 1;
+      syncPlayerBuildStats();
+      healPlayer(1);
+      return;
+    }
+    if (id === "salvage") {
+      state.build.salvage += 1;
+      return;
+    }
+    if (id === "overdrive") {
+      state.build.overdrive += 1;
+      return;
+    }
+    if (id === "patch") {
+      healPlayer(2);
+    }
+  }
+
+  function buildUpgradeOptions() {
+    const rng = makeUpgradeRng();
+    const pool = UPGRADE_CATALOG.filter((item) => item.id !== "patch");
+    const picked = [];
+    while (picked.length < 3 && pool.length > 0) {
+      const idx = Math.floor(rng() * pool.length);
+      picked.push(pool.splice(idx, 1)[0]);
+    }
+    while (picked.length < 3) {
+      picked.push(UPGRADE_CATALOG.find((item) => item.id === "patch"));
+    }
+    const options = picked.map((item) => ({
+      ...item,
+      affordable: state.tech >= item.cost,
+    }));
+    if (!options.some((item) => item.affordable)) {
+      options[0] = {
+        ...UPGRADE_CATALOG.find((item) => item.id === "patch"),
+        affordable: true,
+      };
+    }
+    return options;
+  }
+
+  function renderUpgradeOptions() {
+    if (!upgradeOptions) return;
+    if (state.mode !== "upgrade") {
+      upgradeOptions.classList.add("hidden");
+      upgradeOptions.innerHTML = "";
+      if (menuUpgradeHint) {
+        menuUpgradeHint.classList.add("hidden");
+      }
+      return;
+    }
+    const cards = state.upgradesOffered
+      .map((item, index) => {
+        const classes = [
+          "upgrade-option",
+          state.selectedUpgradeIndex === index ? "is-selected" : "",
+          item.affordable ? "" : "is-locked",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const slot = index + 1;
+        const costText = item.cost === 0 ? "FREE" : `COST ${item.cost} TECH`;
+        return (
+          `<button type="button" class="${classes}" data-upgrade-index="${index}" ${item.affordable ? "" : "disabled"}>` +
+          `<p class="upgrade-option__title">${slot}. ${item.name}</p>` +
+          `<p class="upgrade-option__meta">${costText}</p>` +
+          `<p class="upgrade-option__desc">${item.desc}</p>` +
+          `</button>`
+        );
+      })
+      .join("");
+    upgradeOptions.classList.remove("hidden");
+    upgradeOptions.innerHTML = cards;
+    if (menuUpgradeHint) {
+      menuUpgradeHint.classList.remove("hidden");
+    }
+  }
+
+  function enterUpgradePhase() {
+    state.mode = "upgrade";
+    state.clearFlash = 0.52;
+    state.clearLevel = state.level;
+    state.upgradesOffered = buildUpgradeOptions();
+    state.selectedUpgradeIndex = Math.max(
+      0,
+      state.upgradesOffered.findIndex((item) => item.affordable)
+    );
+    setMenuVisualState("upgrade");
+    showMenu(true);
+    syncTouchControls();
+  }
+
+  function chooseUpgrade(index) {
+    if (state.mode !== "upgrade") return false;
+    const option = state.upgradesOffered[index];
+    if (!option || !option.affordable || state.tech < option.cost) return false;
+    state.tech -= option.cost;
+    applyUpgradeById(option.id);
+    state.lastUpgradeLabel = option.name;
+    if (state.level >= state.maxLevel) {
+      endRun("win");
+      return true;
+    }
+    state.level += 1;
+    state.mode = "playing";
+    showMenu(false);
+    spawnLevel(false);
+    syncTouchControls();
+    return true;
+  }
+
   function setMenuVisualState(mode) {
-    const bestSuffix = state.bestLevel > 1 ? ` Best sector: ${state.bestLevel}.` : "";
+    const bestSuffix = state.bestLevel > 1 ? ` Best wave: ${state.bestLevel}.` : "";
     const bonusSuffix = state.lastRun && state.lastRun.stageBonusScore > 0 ? ` (Stage bonus +${state.lastRun.stageBonusScore})` : "";
     const cleanSuffix = state.lastRun && state.lastRun.cleanSweepScore > 0 ? ` · Clean +${state.lastRun.cleanSweepScore}` : "";
     const summary = state.lastRun
-      ? `Reached Sector ${state.lastRun.level} · ${state.lastRun.totalScore} pts${bonusSuffix}${cleanSuffix} · ${state.lastRun.elapsed.toFixed(1)}s`
+      ? `Reached Wave ${state.lastRun.level} · ${state.lastRun.totalScore} pts${bonusSuffix}${cleanSuffix} · ${state.lastRun.elapsed.toFixed(1)}s`
       : "";
+    renderUpgradeOptions();
+    if (mode === "upgrade") {
+      menuPanel.dataset.state = "upgrade";
+      menuKicker.textContent = `Wave ${state.level} Cleared`;
+      menuTitle.textContent = "Choose 1 Module";
+      menuSubtitle.textContent =
+        `Tech bank ${state.tech} (this wave +${state.waveTech}).\n` +
+        `Pick one option to start Wave ${Math.min(state.maxLevel, state.level + 1)}.`;
+      setStartButtonVisible(false);
+      renderUpgradeOptions();
+      return;
+    }
+
     if (mode === "win") {
       menuPanel.dataset.state = "win";
       menuKicker.textContent = "Run Complete";
-      menuTitle.textContent = "Sector Chain Complete";
-      menuSubtitle.textContent = summary ? `${summary}.${bestSuffix}` : `All sectors stabilized. Navigation lane secure.${bestSuffix}`;
+      menuTitle.textContent = "Wave Chain Complete";
+      menuSubtitle.textContent = summary ? `${summary}.${bestSuffix}` : `All waves stabilized. Navigation lane secure.${bestSuffix}`;
       startBtn.textContent = "Run Again";
+      setStartButtonVisible(true);
       return;
     }
     if (mode === "lose") {
@@ -548,11 +828,11 @@
       menuKicker.textContent = "Signal Lost";
       menuTitle.textContent = "Hull Breach";
       if (state.lastRun) {
-        const nextTarget = Math.min(state.maxLevel, Math.max(2, state.lastRun.level + 1));
+        const nextTarget = Math.min(state.maxLevel, Math.max(2, state.lastRun.level));
         const tip =
           state.lastRun.totalScore === 0
-            ? "Tip: route to the safer shard first, then pulse when two drones stack."
-            : "Tip: bank early shards, then pulse through pressure lanes.";
+            ? "Tip: scoop low-risk cores first, then pulse stacked drones."
+            : "Tip: spend tech each wave to keep up with pressure.";
         const pressure = `Stage ${state.lastRun.stage} ${getPressureBand(state.lastRun.level)}, ${state.lastRun.enemyCount} drones, speed x${state.lastRun.speedScale.toFixed(2)}`;
         const causeLabel =
           state.lastRun.damageTaken >= MAX_PLAYER_HP
@@ -563,35 +843,53 @@
         const lastHit = state.lastRun.lastHitEnemyId ?? "Unknown";
         const cleanTag = state.lastRun.cleanSweepScore > 0 ? ` · Clean +${state.lastRun.cleanSweepScore}` : "";
         menuSubtitle.textContent =
-          `Reached Sector ${state.lastRun.level} · ${state.lastRun.totalScore} pts${cleanTag} · ${state.lastRun.elapsed.toFixed(1)}s${bestSuffix}\n` +
+          `Reached Wave ${state.lastRun.level} · ${state.lastRun.totalScore} pts${cleanTag} · ${state.lastRun.elapsed.toFixed(1)}s${bestSuffix}\n` +
           `Cause: ${causeLabel} (hits ${state.lastRun.damageTaken}, last ${lastHit})\n` +
           `Pressure: ${pressure}\n` +
-          `Next target: Sector ${nextTarget}. ${tip}`;
-        startBtn.textContent = `Retry S${nextTarget}`;
+          `Next target: Wave ${nextTarget}. ${tip}`;
+        startBtn.textContent = `Retry W${nextTarget}`;
+        setStartButtonVisible(true);
         return;
       } else {
         menuSubtitle.textContent = `Drone pressure broke the hull frame. Relaunch and retry.${bestSuffix}`;
       }
       startBtn.textContent = "Retry";
+      setStartButtonVisible(true);
       return;
     }
     menuPanel.dataset.state = "menu";
     menuKicker.textContent = "Mission Brief";
     menuTitle.textContent = "Orb Drift";
-    menuSubtitle.textContent = `Sweep 100 sectors. Every ${LEVELS_PER_STAGE} sectors: +enemy count and +drone speed.\nClean sector (no hits): +1 score.${bestSuffix}`;
+    menuSubtitle.textContent = `Survive ${MAX_LEVEL} waves. Every ${LEVELS_PER_STAGE} waves: +enemy count and +drone speed.\nCollect tech cores, then choose one upgrade each break.${bestSuffix}`;
     startBtn.textContent = "Launch";
+    setStartButtonVisible(true);
+    renderUpgradeOptions();
   }
 
   function startGame() {
     state.mode = "playing";
     state.level = 1;
     state.totalScore = 0;
+    state.tech = 0;
+    state.waveTech = 0;
     state.elapsed = 0;
     state.damageTaken = 0;
     state.stageBonusScore = 0;
     state.cleanSweepScore = 0;
     state.lastHitEnemyId = null;
+    state.lastUpgradeLabel = "";
+    state.upgradesOffered = [];
+    state.selectedUpgradeIndex = 0;
+    state.build = {
+      thruster: 0,
+      capacitor: 0,
+      resonator: 0,
+      alloy: 0,
+      salvage: 0,
+      overdrive: 0,
+    };
     state.runSeed = state.seedOverride ?? createRuntimeSeed();
+    state.liveRng = createRng(mixSeed(state.runSeed, 211));
     state.tutorialMoveHint = true;
     state.tutorialPulseHint = true;
     setMenuVisualState("menu");
@@ -611,9 +909,11 @@
       totalScore: state.totalScore,
       stageBonusScore: state.stageBonusScore,
       cleanSweepScore: state.cleanSweepScore,
+      tech: state.tech,
       elapsed: state.elapsed,
       damageTaken: state.damageTaken,
       lastHitEnemyId: state.lastHitEnemyId,
+      lastUpgradeLabel: state.lastUpgradeLabel,
     };
     state.mode = mode;
     setMenuVisualState(mode);
@@ -653,15 +953,16 @@
 
   function applyPulseAttack() {
     const player = state.player;
-    const radius = 120;
+    const radius = getPulseRadius();
+    const damage = getPulseDamage();
+    const push = getPulsePush();
 
     for (const enemy of state.enemies) {
       const dx = enemy.x - player.x;
       const dy = enemy.y - player.y;
       const dist = Math.hypot(dx, dy);
       if (dist <= radius) {
-        enemy.hp -= 1;
-        const push = 170;
+        enemy.hp -= damage;
         const nx = dist > 0 ? dx / dist : 1;
         const ny = dist > 0 ? dy / dist : 0;
         enemy.x += nx * push * 0.04;
@@ -685,22 +986,26 @@
       const bonusPoints = 2 + clearedStage;
       state.totalScore += bonusPoints;
       state.stageBonusScore += bonusPoints;
-      state.stageBonusFlash = 1.3;
-      state.stageBonusDelay = 0.55;
-      state.stageBonusPoints = bonusPoints;
-      state.stageBonusStage = clearedStage;
+      state.tech += 1;
+      state.pickupBursts.push({
+        x: state.player.x,
+        y: Math.max(38, state.player.y - 40),
+        value: 1,
+        label: `Stage ${clearedStage} +1 Tech`,
+        timer: 0.92,
+      });
     }
     if (state.level >= state.maxLevel) {
       endRun("win");
     } else {
-      state.level += 1;
-      spawnLevel(false);
+      enterUpgradePhase();
     }
   }
 
   function updatePlaying(dt) {
     const player = state.player;
     state.elapsed += dt;
+    state.waveTimer = Math.max(0, state.waveTimer - dt);
     state.levelBannerTimer = Math.max(0, state.levelBannerTimer - dt);
     state.levelEntryShield = Math.max(0, state.levelEntryShield - dt);
     player.invuln = Math.max(0, player.invuln - dt);
@@ -718,7 +1023,7 @@
     clampEntity(player);
 
     if (pressedThisFrame.has("Space") && player.pulseCooldown <= 0) {
-      player.pulseCooldown = 0.7;
+      player.pulseCooldown = getPulseCooldown();
       player.pulseTimer = 0.2;
       applyPulseAttack();
     }
@@ -753,22 +1058,43 @@
     }
     state.nearestEnemyDist = nearestEnemyDist;
 
+    const pickupAssist = getPickupAssistRadius();
     state.shards = state.shards.filter((shard) => {
       const dist = Math.hypot(shard.x - player.x, shard.y - player.y);
-      if (dist <= shard.r + player.r) {
+      if (dist <= shard.r + player.r + pickupAssist) {
         const value = shard.value ?? 1;
         state.score += 1;
+        state.waveTech += value;
+        state.tech += value;
         state.totalScore += value;
-        state.pickupBursts.push({ x: shard.x, y: shard.y, value, timer: 0.46 });
+        state.pickupBursts.push({ x: shard.x, y: shard.y, value, label: `+${value} Tech`, timer: 0.5 });
         return false;
       }
       return true;
     });
 
-    if (state.score >= state.goal) {
+    state.enemySpawnTimer -= dt;
+    while (state.enemySpawnTimer <= 0) {
+      state.enemySpawnTimer += state.enemySpawnInterval;
+      if (state.enemies.length < state.enemyTarget) {
+        spawnReinforcementEnemy();
+      }
+    }
+
+    state.rewardSpawnTimer -= dt;
+    while (state.rewardSpawnTimer <= 0) {
+      state.rewardSpawnTimer += state.rewardSpawnInterval;
+      if (state.shards.length < state.goal) {
+        spawnRewardCore();
+      }
+    }
+
+    if (state.waveTimer <= 0) {
       handleSectorClear();
       return;
     }
+
+    state.spawnDiagnostics = buildSpawnDiagnostics(state.player, state.enemies, state.shards);
 
     if (player.hp <= 0) {
       endRun("lose");
@@ -778,10 +1104,6 @@
   function update(dt) {
     state.damageFlash = Math.max(0, state.damageFlash - dt);
     state.clearFlash = Math.max(0, state.clearFlash - dt);
-    state.stageBonusDelay = Math.max(0, state.stageBonusDelay - dt);
-    if (state.stageBonusDelay <= 0 && state.milestoneFlash <= 0) {
-      state.stageBonusFlash = Math.max(0, state.stageBonusFlash - dt);
-    }
     state.milestoneFlash = Math.max(0, state.milestoneFlash - dt);
     state.launchFlash = Math.max(0, state.launchFlash - dt);
     state.pickupBursts = state.pickupBursts
@@ -993,7 +1315,7 @@
       ctx.strokeStyle = `rgba(73, 189, 255, ${0.24 + ratio * 0.56})`;
       ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.arc(player.x, player.y, 120 * (1 - ratio * 0.18), 0, Math.PI * 2);
+      ctx.arc(player.x, player.y, getPulseRadius() * (1 - ratio * 0.18), 0, Math.PI * 2);
       ctx.stroke();
     } else if (player.pulseCooldown <= 0) {
       const alpha = 0.15 + ((Math.sin(t * 6) + 1) * 0.5) * 0.18;
@@ -1009,7 +1331,7 @@
       ctx.strokeStyle = `rgba(116, 211, 255, ${rangeAlpha})`;
       ctx.lineWidth = 1.8;
       ctx.beginPath();
-      ctx.arc(player.x, player.y, 120, 0, Math.PI * 2);
+      ctx.arc(player.x, player.y, getPulseRadius(), 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }
@@ -1064,14 +1386,16 @@
     const player = state.player;
     const baseX = 16;
     const baseY = 14;
+    const maxHp = getMaxPlayerHp();
+    const pulseCooldownMax = getPulseCooldown();
     const hpAccent = player.hp <= 2 ? "rgba(255, 138, 162, 0.95)" : "rgba(104, 236, 255, 0.92)";
     const modules = [
-      { label: "HP", value: `${player.hp}/${MAX_PLAYER_HP}`, width: 122, accent: hpAccent },
-      { label: "LEVEL", value: `${state.level}/${state.maxLevel}`, width: 166, accent: "rgba(99, 175, 255, 0.92)" },
-      { label: "SHARDS", value: `${state.score}/${state.goal}`, width: 152, accent: "rgba(95, 241, 227, 0.9)" },
+      { label: "HP", value: `${player.hp}/${maxHp}`, width: 122, accent: hpAccent },
+      { label: "WAVE", value: `${state.level}/${state.maxLevel}`, width: 158, accent: "rgba(99, 175, 255, 0.92)" },
+      { label: "TECH", value: `${state.tech}`, width: 146, accent: "rgba(95, 241, 227, 0.9)" },
       {
         label: "THREAT / DRONES",
-        value: `x${getSpeedScale().toFixed(2)} · ${state.enemies.length}`,
+        value: `x${getSpeedScale().toFixed(2)} · ${state.enemyTarget}`,
         width: 178,
         accent: "rgba(255, 188, 112, 0.92)",
       },
@@ -1098,16 +1422,16 @@
     ctx.font = "700 11px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.textAlign = "left";
     ctx.fillText("PULSE", pulsePanelX + 13, baseY + 19);
-    ctx.fillText("TIME", pulsePanelX + 126, baseY + 19);
+    ctx.fillText("WAVE TIMER", pulsePanelX + 116, baseY + 19);
 
     ctx.font = "700 20px 'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = player.pulseCooldown <= 0 ? "#94f0ff" : "#f8f4ff";
     ctx.fillText(pulseText, pulsePanelX + 13, baseY + 44);
 
     ctx.fillStyle = "#f8fcff";
-    ctx.fillText(`${state.elapsed.toFixed(1)}s`, pulsePanelX + 126, baseY + 44);
+    ctx.fillText(`${state.waveTimer.toFixed(1)}s`, pulsePanelX + 116, baseY + 44);
 
-    const cooldownProgress = Math.max(0, Math.min(1, 1 - player.pulseCooldown / 0.7));
+    const cooldownProgress = Math.max(0, Math.min(1, 1 - player.pulseCooldown / Math.max(0.01, pulseCooldownMax)));
     const barX = pulsePanelX + 13;
     const barY = baseY + 48;
     const barW = 208;
@@ -1120,9 +1444,9 @@
     ctx.fillStyle = "rgba(236, 248, 255, 0.98)";
     ctx.fillText(`TOTAL SCORE ${state.totalScore}`, baseX + 4, baseY + 72);
     ctx.fillStyle = "rgba(191, 231, 249, 0.95)";
-    ctx.fillText(`CLEAN SWEEP +${state.cleanSweepScore}`, baseX + 4, baseY + 88);
+    ctx.fillText(`WAVE TECH +${state.waveTech}`, baseX + 4, baseY + 88);
     ctx.fillStyle = "rgba(196, 232, 250, 0.93)";
-    ctx.fillText("VALUE LEGEND 1 COOL · 2 WARM · 3 HOT", baseX + 176, baseY + 88);
+    ctx.fillText(`LAST UPGRADE ${state.lastUpgradeLabel || "NONE"}`, baseX + 176, baseY + 88);
 
     const stage = getStageForLevel(state.level);
     const nextMilestone = getNextMilestoneLevel(state.level);
@@ -1136,12 +1460,11 @@
     ctx.fillStyle = "rgba(149, 240, 255, 0.98)";
     const stageText =
       state.level >= state.maxLevel
-        ? `STAGE ${stage} ${getPressureBand(state.level)} · FINAL SECTOR`
-        : `STAGE ${stage} ${getPressureBand(state.level)} · NEXT @ S${nextMilestone} (${levelsToNextStage} TO GO)`;
+        ? `STAGE ${stage} ${getPressureBand(state.level)} · FINAL WAVE`
+        : `STAGE ${stage} ${getPressureBand(state.level)} · NEXT @ W${nextMilestone} (${levelsToNextStage} TO GO)`;
     ctx.fillText(stageText, baseX + 184, baseY + 72);
 
-    const remainingShards = Math.max(0, state.goal - state.score);
-    const cleanActive = state.sectorDamageTaken === 0;
+    const progressRatio = Math.max(0, Math.min(1, 1 - state.waveTimer / Math.max(0.01, state.waveDuration)));
     const objectiveX = 16;
     const objectiveY = world.height - 62;
     const objectiveW = 420;
@@ -1160,15 +1483,15 @@
     ctx.fillStyle = "rgba(40, 71, 99, 0.58)";
     ctx.fillRect(progressX, progressY, progressW, 3);
     ctx.fillStyle = "#67e6f6";
-    ctx.fillRect(progressX, progressY, progressW * (state.score / state.goal), 3);
+    ctx.fillRect(progressX, progressY, progressW * progressRatio, 3);
 
     ctx.fillStyle = "#edf8ff";
     ctx.font = "700 12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.textAlign = "left";
-    ctx.fillText(`Objective: ${remainingShards} shard${remainingShards === 1 ? "" : "s"} to clear sector`, objectiveX + 10, objectiveY + 16);
-    ctx.fillStyle = cleanActive ? "rgba(180, 248, 228, 0.98)" : "rgba(255, 195, 156, 0.94)";
+    ctx.fillText(`Objective: survive this wave and bank tech cores`, objectiveX + 10, objectiveY + 16);
+    ctx.fillStyle = "rgba(180, 248, 228, 0.98)";
     ctx.font = "700 11px 'Avenir Next', 'Trebuchet MS', sans-serif";
-    ctx.fillText(cleanActive ? "Clean bonus armed (+1)" : "Clean bonus lost this sector", objectiveX + 10, objectiveY + 31);
+    ctx.fillText(`On break: choose 1 of 3 upgrades`, objectiveX + 10, objectiveY + 31);
 
     if (state.levelEntryShield > 0) {
       ctx.textAlign = "right";
@@ -1228,7 +1551,7 @@
       ctx.fillStyle = `rgba(237, 248, 255, ${alpha})`;
       ctx.font = "700 24px 'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(`Sector ${state.level}`, world.width / 2, 117);
+      ctx.fillText(`Wave ${state.level}`, world.width / 2, 117);
     }
   }
 
@@ -1357,7 +1680,7 @@
       ctx.fillStyle = `rgba(229, 255, 251, ${Math.min(1, ratio * 1.4)})`;
       ctx.font = "700 28px 'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(`Sector ${state.clearLevel} Cleared`, world.width / 2, world.height * 0.42);
+      ctx.fillText(`Wave ${state.clearLevel} Cleared`, world.width / 2, world.height * 0.42);
     } else if (state.clearFlash > 0) {
       const ratio = state.clearFlash / 0.52;
       const alpha = Math.min(0.08, ratio * 0.08);
@@ -1416,19 +1739,19 @@
 
       ctx.font = "700 14px 'Avenir Next', 'Trebuchet MS', sans-serif";
       ctx.fillStyle = `rgba(222, 243, 255, ${0.9 * alpha})`;
-      ctx.fillText(`Collect ${state.goal} shards to clear Sector ${state.level}`, world.width / 2, world.height * 0.37 + 26);
+      ctx.fillText(`Survive ${state.waveDuration.toFixed(0)}s and collect tech cores`, world.width / 2, world.height * 0.37 + 26);
     }
 
     if (state.mode === "playing" && state.level === 1 && state.elapsed < 14 && state.nearestEnemyDist >= 165 && !hasStagePriorityOverlay) {
       const tips = [];
       if (state.tutorialMoveHint) {
-        tips.push(hasTouchUi() ? "Use D-pad to drift through shards" : "Use Arrow keys or WASD to drift through shards");
+        tips.push(hasTouchUi() ? "Use D-pad to route through cores" : "Use Arrow keys or WASD to route through cores");
       }
       if (state.tutorialPulseHint) {
         tips.push(hasTouchUi() ? "Tap PULSE when drones close in" : "Press Space when drones close in");
       }
       if (state.totalScore === 0) {
-        tips.push("Warmer shards are worth more score");
+        tips.push("High-risk cores grant more tech");
       }
       if (tips.length > 0) {
         const boxW = 342;
@@ -1514,12 +1837,36 @@
       syncTouchControls();
     }
 
-    if (code === "KeyR" && (state.mode === "playing" || state.mode === "paused" || state.mode === "win" || state.mode === "lose")) {
+    if (code === "KeyR" && (state.mode === "playing" || state.mode === "paused" || state.mode === "upgrade" || state.mode === "win" || state.mode === "lose")) {
       startGame();
     }
 
     if (code === "Enter" && (state.mode === "menu" || state.mode === "win" || state.mode === "lose")) {
       startGame();
+      return;
+    }
+
+    if (state.mode === "upgrade") {
+      if (code === "Digit1" || code === "Digit2" || code === "Digit3") {
+        const index = Number(code.replace("Digit", "")) - 1;
+        state.selectedUpgradeIndex = Math.max(0, Math.min(2, index));
+        renderUpgradeOptions();
+        chooseUpgrade(index);
+        return;
+      }
+      if (code === "ArrowLeft") {
+        state.selectedUpgradeIndex = (state.selectedUpgradeIndex + 2) % 3;
+        renderUpgradeOptions();
+        return;
+      }
+      if (code === "ArrowRight") {
+        state.selectedUpgradeIndex = (state.selectedUpgradeIndex + 1) % 3;
+        renderUpgradeOptions();
+        return;
+      }
+      if (code === "Enter") {
+        chooseUpgrade(state.selectedUpgradeIndex);
+      }
     }
   }
 
@@ -1580,6 +1927,17 @@
   });
   document.addEventListener("fullscreenchange", resizeCanvasCss);
   startBtn.addEventListener("click", startGame);
+  if (upgradeOptions) {
+    upgradeOptions.addEventListener("click", (event) => {
+      const target = event.target.closest("[data-upgrade-index]");
+      if (!target) return;
+      const index = Number(target.dataset.upgradeIndex);
+      if (!Number.isFinite(index)) return;
+      state.selectedUpgradeIndex = Math.max(0, Math.min(2, index));
+      renderUpgradeOptions();
+      chooseUpgrade(index);
+    });
+  }
 
   for (const button of touchButtons) {
     const code = button.dataset.code;
@@ -1651,10 +2009,26 @@
       pressureBand: getPressureBand(state.level),
       levelsPerStage: LEVELS_PER_STAGE,
       levelsToNextStage: getLevelsToNextStage(state.level),
-      enemyCountTarget: getEnemyCountForLevel(state.level),
+      enemyCountTarget: state.enemyTarget,
       runSeed: state.runSeed,
       seedLocked: state.seedOverride !== null,
       enemySpeedScale: Number(getSpeedScale().toFixed(2)),
+      waveDuration: Number(state.waveDuration.toFixed(2)),
+      waveTimer: Number(state.waveTimer.toFixed(2)),
+      tech: state.tech,
+      waveTech: state.waveTech,
+      upgradeMode: state.mode === "upgrade",
+      upgradesOffered: state.upgradesOffered.map((item, index) => ({
+        index,
+        id: item.id,
+        name: item.name,
+        cost: item.cost,
+        affordable: state.tech >= item.cost,
+      })),
+      selectedUpgradeIndex: state.selectedUpgradeIndex,
+      build: {
+        ...state.build,
+      },
       player: {
         x: Number(state.player.x.toFixed(2)),
         y: Number(state.player.y.toFixed(2)),
@@ -1662,8 +2036,13 @@
         vy: Number(state.player.vy.toFixed(2)),
         r: state.player.r,
         hp: state.player.hp,
+        maxHp: getMaxPlayerHp(),
+        speed: Number(state.player.speed.toFixed(2)),
         invuln: Number(state.player.invuln.toFixed(2)),
         pulseCooldown: Number(state.player.pulseCooldown.toFixed(2)),
+        pulseCooldownMax: Number(getPulseCooldown().toFixed(2)),
+        pulseRadius: Number(getPulseRadius().toFixed(2)),
+        pulseDamage: getPulseDamage(),
         pulseActive: state.player.pulseTimer > 0,
       },
       enemies: state.enemies.map((enemy) => ({
@@ -1696,6 +2075,7 @@
       fullscreen: Boolean(document.fullscreenElement),
       paused: state.mode === "paused",
       lastHitEnemyId: state.lastHitEnemyId,
+      lastUpgradeLabel: state.lastUpgradeLabel,
       lastRun: state.lastRun
         ? {
             mode: state.lastRun.mode,
@@ -1706,6 +2086,8 @@
             totalScore: state.lastRun.totalScore,
             stageBonusScore: state.lastRun.stageBonusScore,
             cleanSweepScore: state.lastRun.cleanSweepScore ?? 0,
+            tech: state.lastRun.tech ?? 0,
+            lastUpgradeLabel: state.lastRun.lastUpgradeLabel ?? "",
             elapsed: Number(state.lastRun.elapsed.toFixed(2)),
             damageTaken: state.lastRun.damageTaken,
             lastHitEnemyId: state.lastRun.lastHitEnemyId,
@@ -1731,27 +2113,49 @@
     forceWin: () => endRun("win"),
     forceLose: () => endRun("lose"),
     setPlayerHp: (hp) => {
-      const value = Math.max(0, Math.min(MAX_PLAYER_HP, Math.round(Number(hp) || 0)));
+      const value = Math.max(0, Math.min(getMaxPlayerHp(), Math.round(Number(hp) || 0)));
       state.player.hp = value;
     },
+    setTech: (value) => {
+      state.tech = Math.max(0, Math.round(Number(value) || 0));
+      renderUpgradeOptions();
+      return state.tech;
+    },
     setLevel: (level) => {
-      if (state.mode !== "playing" && state.mode !== "paused") return;
+      if (state.mode !== "playing" && state.mode !== "paused" && state.mode !== "upgrade") return;
       state.level = Math.max(1, Math.min(state.maxLevel, Math.round(Number(level) || 1)));
+      state.mode = "playing";
+      showMenu(false);
       spawnLevel(false);
     },
-    forceClearSector: () => {
+    forceEndWave: () => {
       if (state.mode !== "playing" && state.mode !== "paused") return null;
-      state.score = state.goal;
+      state.waveTimer = 0;
       handleSectorClear();
       return {
+        mode: state.mode,
+        level: state.level,
+        tech: state.tech,
+      };
+    },
+    chooseUpgrade: (index) => chooseUpgrade(Math.max(0, Math.min(2, Math.round(Number(index) || 0)))),
+    forceClearSector: () => {
+      if (state.mode !== "playing" && state.mode !== "paused") return null;
+      state.waveTimer = 0;
+      handleSectorClear();
+      return {
+        mode: state.mode,
         level: state.level,
         totalScore: state.totalScore,
+        tech: state.tech,
         stageBonusScore: state.stageBonusScore,
         cleanSweepScore: state.cleanSweepScore,
       };
     },
   };
 
+  setMenuVisualState("menu");
+  showMenu(true);
   resizeCanvasCss();
   renderControlChips();
   syncTouchControls();

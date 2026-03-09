@@ -16,20 +16,20 @@
         <section class="menu-panel" id="menu-panel" data-state="menu" aria-live="polite">
           <p class="menu-kicker" id="menu-kicker">Mission Brief</p>
           <h1 class="menu-title" id="menu-title">Orb Drift</h1>
-          <p class="menu-subtitle" id="menu-subtitle">Sweep 100 sectors. Every 4 sectors: +enemy count and +drone speed. Clean sector (no hits): +1 score.</p>
+          <p class="menu-subtitle" id="menu-subtitle">Survive short waves, collect tech cores, then choose one module between waves.</p>
 
           <div class="brief-grid" aria-label="Mission stats">
             <div class="brief-item">
               <p class="brief-label">Sectors</p>
-              <p class="brief-value">100</p>
+              <p class="brief-value">12 Waves</p>
             </div>
             <div class="brief-item">
               <p class="brief-label">Hull</p>
               <p class="brief-value">5 HP</p>
             </div>
             <div class="brief-item">
-              <p class="brief-label">Pulse</p>
-              <p class="brief-value">0.7s CD</p>
+              <p class="brief-label">Growth</p>
+              <p class="brief-value">Pick 1</p>
             </div>
           </div>
 
@@ -40,6 +40,9 @@
             <div class="control-chip"><kbd>R</kbd><span>Restart</span></div>
             <div class="control-chip"><kbd>F</kbd><span>Fullscreen</span></div>
           </div>
+
+          <div class="upgrade-options hidden" id="upgrade-options" aria-label="Upgrade options"></div>
+          <p class="menu-upgrade-hint hidden" id="menu-upgrade-hint">Use 1 / 2 / 3 to choose</p>
 
           <button id="start-btn" type="button">Launch</button>
         </section>
