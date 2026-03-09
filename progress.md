@@ -408,6 +408,48 @@ Original prompt: Build and iterate a playable web game in this workspace, valida
   - Marked mobile touch occlusion issue done.
   - Kept overall mobile density as `in_progress` for continued refinement.
 
+### Round 10 - PASS
+- Selected issues:
+  - `UX-005` (`P2`) 阶段切换时 `Launch / Stage Surge / Sector Cleared / Stage Bonus` 反馈可能重叠。
+  - `PG-006` (`P2`, in progress) 关键反馈竞争会削弱奖励与阶段变化的可感知性。
+  - `PG-003` (`P0`, in progress) 阶段规则要“看得见且看得懂”。
+- Product hypothesis:
+  - 若转场提示按优先级错峰展示，玩家能更快理解“这关发生了什么变化”。
+- Gameplay hypothesis:
+  - 延迟 stage bonus 文案并在高优先级阶段提示出现时抑制 launch/tutorial 文案，可降低信息冲突。
+- Input/control hypothesis:
+  - 反馈层显示顺序调整不应影响输入行为与状态流转。
+- Code changes:
+  - `game.js`
+    - 引入 `stageBonusDelay` 机制，阶段奖励提示延后出现。
+    - 在高优先级阶段提示出现时抑制 `launchFlash` 与教程提示。
+    - 反馈层增加优先级判断入口（本轮为后续 Round 18 的层级治理打基础）。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round10`
+- Visual validation:
+  - Desktop/mobile 视口均已生成（`output/web-game/v3-round10/*viewport*.png`）。
+  - Stage bonus 场景截图已核对：`output/web-game/v3-round10/stage-bonus/shot.png`。
+- Functional validation:
+  - 场景矩阵通过，无 `errors-*.json`。
+- Input validation:
+  - `output/web-game/v3-round10/input-regression/probe.json` 全通过（Arrow/WASD/`A` 无暂停冲突/`P`/`R`/`F`）。
+- Gameplay validation:
+  - 阶段切换信息冲突减少，玩家对阶段变化和奖励反馈的识别更直接。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round10/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - `uniqueEnemyLayouts=6`
+    - `uniqueShardLayouts=6`
+    - 四维全部 `pass`
+- Regression check:
+  - `progression/probe.json` 与 `stage-bonus/probe.json` 均通过。
+- Result:
+  - PASS
+- Backlog update:
+  - `UX-005` 保持 `open`，进入下一轮继续深度治理。
+- Next round plan:
+  - Round 11 优先修复输入焦点切换卡键风险（`IN-003`）。
+
 ### Round 11 - PASS
 - Roles check:
   - Product: menu->run emotional shift was still weak; start felt like a state toggle, not a launch beat.
@@ -612,3 +654,1086 @@ Original prompt: Build and iterate a playable web game in this workspace, valida
   - Win-state check: `output/web-game/round20/debug-win/state.json` => `mode=win`, with best-sector subtitle confirmed in `output/web-game/round20/debug-win/subtitle.txt`.
 - Backlog update:
   - Added and closed pulse-range decision readability item.
+
+## 2026-03-09 Gameplay Productization Program (Randomness + Input + Pacing)
+
+Original prompt: 作为当前项目临时主负责人，连续执行 20 轮“产品判断 + 开发修改 + QA 回归”，重点优化敌人随机出生、奖励品位置、每 N 关难度阶段、Arrow+WASD 双键位、A 键冲突与可复现随机验证。
+
+### Baseline Pre-Round (no gameplay code changes)
+- Read-through completed:
+  - `index.html` page structure/menu/touch controls
+  - `styles.css` style entry/responsive/touch layout
+  - `game.js` canvas rendering, input map, state flow, spawn logic, level progression, debug APIs
+  - `scripts/validate_round.sh`, `scripts/run_round_checks.sh`, viewport/mobile probes, action payloads
+  - `AGENTS` instructions from user prompt and `develop-web-game` skill workflow
+- Implementation map:
+  - Page structure: `index.html`
+  - Style entry: `styles.css`
+  - Canvas draw loop: `game.js` (`draw*` + `render`)
+  - Input handling: `game.js` (`keydown/keyup`, `keyToDirection`, touch pointer bridge)
+  - State management: `game.js` (`state`, `startGame`, `endRun`, `spawnLevel`, `update`)
+  - Level progression: `game.js` (`state.level`, `getSpeedScale`, `spawnLevel`, clear-to-next-level branch)
+  - Enemy generation: `game.js` (`BASE_ENEMIES`, `buildLevelEnemies`)
+  - Reward generation: `game.js` (`SHARD_PATTERNS`, `buildLevelShards`)
+  - Responsive logic: `styles.css` media queries + `game.js` `resizeCanvasCss()`
+  - Available test/debug routes: `scripts/validate_round.sh`, `scripts/capture_round_viewports.mjs`, `scripts/mobile_touch_probe.mjs`, `window.render_game_to_text`, `window.advanceTime`, `window.orbDriftDebug`
+- Baseline run executed (`output/web-game/v2-baseline`):
+  - Desktop viewport: `1440x960`
+  - Mobile viewport: `390x844`
+  - Gameplay scenarios: `movement_collect`, `pause_resume`, `level_speedup`, `lose_state`
+  - Mobile touch probe executed and verified enters active play
+- Baseline findings (product + functional + input):
+  - Enemy and shard layouts are effectively deterministic per level; randomness/replay variety is insufficient.
+  - Enemy count is static; speed rises each level linearly. No clear "every N levels" staged escalation rule.
+  - Movement supports Arrow only. `A` is mapped to pause, directly conflicting with required WASD-left behavior.
+  - Existing regression payloads still rely on old `A/B` mappings and do not test Arrow/WASD parity.
+  - No seed-based reproducibility framework yet for fairness validation across multiple seeds.
+- Initial backlog reset:
+  - Replaced `backlog.md` with this task-specific prioritized backlog (IDs `PG-*`, `IN-*`, `FN-*`, `UX-*`).
+
+### Round 1 - PASS
+- Selected issues:
+  - `IN-001` (`P0`) Missing WASD movement support.
+  - `IN-002` (`P0`) `A` key pause conflict with planned WASD-left mapping.
+  - `FN-002` (`P1`) Regression suite did not verify Arrow + WASD parity.
+- Product hypothesis:
+  - If players can use either Arrow or WASD immediately and hints match behavior, first-minute friction and perceived control quality improve.
+- Gameplay hypothesis:
+  - Removing key-role ambiguity (`A` pause) prevents accidental state changes during evasive movement, improving fairness under pressure.
+- Input/control hypothesis:
+  - Binding pause strictly to `P`, restart strictly to `R`, while enabling full WASD movement will stabilize input mental model and reduce control errors.
+- Code changes:
+  - `game.js`
+    - Added dual-direction mapping (`Arrow` + `W/A/S/D`) in `keyToDirection()`.
+    - Removed `KeyA` pause alias; pause now `KeyP` only.
+    - Removed `KeyB` restart alias; restart now `KeyR` only.
+    - Updated gameplay key default prevention to include WASD.
+    - Updated paused overlay prompt to `Press P to resume`.
+    - Updated in-run tutorial text to `Arrow keys or WASD`.
+    - Updated desktop control-chip content to `Arrows / WASD`, `P`, `R`, `F`.
+  - `index.html`
+    - Updated menu control chips to match new key bindings.
+  - Test tooling:
+    - Added `scripts/input_regression_probe.mjs` (Arrow/WASD parity, `A` no-pause, `P/R/F` flow).
+    - Added `scripts/randomness_fairness_probe.mjs` (multi-run fairness/variation snapshot).
+    - Updated `scripts/run_round_checks.sh` scenarios (removed old `pause_resume` dependency on `A`).
+    - Updated `scripts/validate_round.sh` to include input + randomness probes every round.
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round1`
+  - Included: `movement_collect`, `damage_position_lock`, `level_speedup`, `lose_state`, viewport capture, mobile touch probe, input regression probe, randomness fairness probe.
+- Visual validation:
+  - Desktop: `output/web-game/v3-round1/desktop-viewport.png` shows updated `Arrows / WASD` + `P/R/F` chips.
+  - Mobile: `output/web-game/v3-round1/mobile-viewport.png` keeps readable mission/control panel.
+  - Gameplay: `output/web-game/v3-round1/movement_collect/shot-0.png` and `input-regression/shot.png` show in-run HUD/tutorial text consistent with new mappings.
+- Functional validation:
+  - `movement_collect` -> `mode=playing`, score progression normal.
+  - `damage_position_lock` -> still no forced position shift from damage logic.
+  - `level_speedup` -> progression to higher level/speed still valid.
+  - `lose_state` -> lose transition still valid.
+  - No `errors-*.json` generated in `output/web-game/v3-round1`.
+- Input validation:
+  - `output/web-game/v3-round1/input-regression/probe.json`:
+    - Arrow movement: pass.
+    - WASD movement (`W/A/S/D`): pass.
+    - Mixed inputs: pass.
+    - `A` no longer pauses: pass.
+    - `P` pause/resume: pass.
+    - `R` restart reset: pass.
+    - `F` then continue input: pass.
+- Gameplay validation:
+  - Immediate control reliability improved; accidental pause from `A` removed, reducing unfair deaths during lateral dodge input.
+- Randomness/fairness validation:
+  - `output/web-game/v3-round1/randomness/probe.json` (6 runs):
+    - `hasSeedSupport=false`
+    - `uniqueEnemyLayouts=4` (minor runtime drift only), `uniqueShardLayouts=1` (effectively deterministic reward layout)
+    - Dimensions: `fairness=pass`, `variation=needs_work`, `replayability=needs_work`
+  - Conclusion: fairness floor currently acceptable at spawn distance, but variation and replay value remain insufficient.
+- Regression check:
+  - Desktop + mobile + touch probes all pass.
+  - Existing core loop (start/move/pulse/collect/lose/level-up) preserved.
+- Result:
+  - PASS
+- Backlog update:
+  - Marked fixed: `IN-001`, `IN-002`, `IN-004`, `FN-002`, `FN-003`.
+  - Kept open: `FN-001`, `PG-001`, `PG-002`, `PG-003` as top next-round priorities.
+- Next round plan:
+  - Round 2 will add seed-based reproducible randomness (`setSeed` + deterministic RNG stream) to unlock true multi-seed fairness testing.
+
+### Round 2 - PASS
+- Selected issues:
+  - `FN-001` (`P0`) Missing seed-based reproducibility for random system validation.
+  - `PG-001` (`P0`) Enemy spawn deterministic; no variation across runs.
+  - `PG-004` (`P1`) Need stronger spawn fairness floor before pacing changes.
+- Product hypothesis:
+  - Introducing constrained random enemy spawn with deterministic seeds will increase replay variety while preserving a fairness baseline.
+- Gameplay hypothesis:
+  - Enforcing player safe distance + enemy spacing at spawn reduces unfair opener patterns without removing pressure.
+- Input/control hypothesis:
+  - Existing Round 1 input scheme must remain fully stable after random system refactor.
+- Code changes:
+  - `game.js`
+    - Replaced fixed enemy coordinates with seeded procedural spawn using deterministic RNG (`createRng`, `mixSeed`, per-level seed stream).
+    - Added spawn constraints:
+      - player safety distance floor
+      - enemy-to-enemy minimum gap
+      - minimum X separation from player spawn lane
+    - Added runtime/debug seed plumbing:
+      - `state.runSeed`, `state.seedOverride`
+      - `orbDriftDebug.setSeed(seed)`, `clearSeed()`, `getSeed()`
+      - `render_game_to_text` now includes `runSeed` and `seedLocked`.
+  - `scripts/randomness_fairness_probe.mjs`
+    - Fixed seed-argument parsing bug (empty arg no longer coerces to seed `0`).
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round2`
+  - Follow-up re-run: `node scripts/randomness_fairness_probe.mjs v3-round2` (after parser fix).
+- Visual validation:
+  - Desktop/mobile menu layout remains stable: `output/web-game/v3-round2/desktop-viewport.png`, `mobile-viewport.png`.
+  - Gameplay capture confirms random enemy geometry in-run: `output/web-game/v3-round2/movement_collect/shot-0.png`.
+- Functional validation:
+  - Core flows remain valid (`movement_collect`, `damage_position_lock`, `level_speedup`, `lose_state`).
+  - Mobile touch probe remains playable (`output/web-game/v3-round2/mobile-touch/state.json`).
+  - No `errors-*.json` generated.
+- Input validation:
+  - `output/web-game/v3-round2/input-regression/probe.json` all checks pass:
+    - Arrow/WASD movement
+    - `A` no pause
+    - `P` pause/resume
+    - `R` restart
+    - `F` then input continuity
+- Gameplay validation:
+  - Enemy openings are no longer fixed and now differ by run seed.
+  - Early fairness floor improved on player-face spawn avoidance.
+- Randomness/fairness validation:
+  - `output/web-game/v3-round2/randomness/probe.json`:
+    - `hasSeedSupport=true`
+    - `seedsUsed=[1,2,3,4,5,6]`
+    - `uniqueEnemyLayouts=6` (variation established)
+    - `uniqueShardLayouts=1` (reward variation still missing)
+    - `fairnessPassRate=0.5` (fails mainly on shard-danger proximity)
+  - Dimension judgment:
+    - Fairness: needs work
+    - Variation: partial (enemy yes, shard no)
+    - Readability: pass
+    - Replayability: needs work
+- Regression check:
+  - Round 1 input guarantees are preserved.
+  - Desktop/mobile/touch + gameplay loops still stable after spawn refactor.
+- Result:
+  - PASS
+- Backlog update:
+  - Marked fixed: `FN-001`.
+  - `PG-001` moved to `in_progress`.
+  - `PG-002` promoted as next critical blocker because shard spawn remains deterministic and often mismatched with threat fields.
+- Next round plan:
+  - Round 3 will rebuild shard spawning to be seed-driven and risk-aware (not free, not near-suicide), targeting fairness pass rate uplift in multi-seed probe.
+
+### Round 3 - PASS
+- Selected issues:
+  - `PG-002` (`P0`) Shards still deterministic and low decision value.
+  - `PG-001` (`P0`, in progress) Enemy variation improved but full replay value blocked by fixed rewards.
+  - `PG-004` (`P1`) Reward spawn should avoid both "free gift" and "suicide bait" extremes.
+- Product hypothesis:
+  - If shards are placed with mixed risk bands, players will need to route and prioritize targets, increasing replayable decision-making.
+- Gameplay hypothesis:
+  - Seeded shard placement constrained by player distance, enemy danger distance, and inter-shard spacing will improve fairness + variation simultaneously.
+- Input/control hypothesis:
+  - Input behavior must remain identical while spawn logic changes.
+- Code changes:
+  - `game.js`
+    - Replaced fixed shard pattern usage with seeded procedural shard spawning.
+    - Added shard spawn constraints:
+      - minimum/maximum player distance
+      - minimum/maximum enemy distance
+      - minimum shard-to-shard gap
+      - minimum X offset from player spawn lane
+    - Added risk-targeting profile (`SHARD_RISK_TARGETS`) so 3 shards distribute across safer/contested/riskier bands.
+    - Kept deterministic fallback shard pattern path if constrained generation fails.
+    - `spawnLevel()` now builds shards from current enemy layout (`buildLevelShards(state.enemies)`).
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round3`
+- Visual validation:
+  - Desktop: `output/web-game/v3-round3/desktop-viewport.png`
+  - Mobile: `output/web-game/v3-round3/mobile-viewport.png`
+  - Gameplay: `output/web-game/v3-round3/movement_collect/shot-0.png` and `randomness/shot.png` show diversified shard distribution.
+- Functional validation:
+  - Core loop still functional (start, move, collect, lose, restart flows intact).
+  - `lose_state` path valid with random shards/enemies.
+  - Mobile touch probe still enters and sustains active play.
+  - No `errors-*.json` generated.
+- Input validation:
+  - `output/web-game/v3-round3/input-regression/probe.json` all checks remain `true` (Arrow/WASD parity + `P/R/F` + no `A` pause regression).
+- Gameplay validation:
+  - Shards now appear in varied lanes and distances, requiring route choices rather than straight-line pickup.
+  - Rewards are no longer face-delivered at start and are less frequently placed in near-impossible danger pockets.
+- Randomness/fairness validation:
+  - `output/web-game/v3-round3/randomness/probe.json` (seeds 1..6):
+    - `uniqueEnemyLayouts=6`
+    - `uniqueShardLayouts=6`
+    - `fairnessPassRate=1`
+    - Dimensions all `pass` (`fairness`, `variation`, `readability`, `replayability`)
+- Regression check:
+  - Round 1 input guarantees preserved.
+  - Round 2 seed plumbing still active (`hasSeedSupport=true`, seeds enumerated correctly).
+- Result:
+  - PASS
+- Backlog update:
+  - Marked fixed: `PG-002`.
+  - Added `FN-005`: old `level_speedup` action is no longer reliable after random shard placement; needs dedicated progression probe.
+- Next round plan:
+  - Round 4 will formalize a deterministic progression probe and start reshaping level scaling from per-level linear to stage-based ("every N levels").
+
+### Round 4 - PASS
+- Selected issues:
+  - `PG-003` (`P0`) Missing explicit staged difficulty rule ("every N levels").
+  - `PG-005` (`P1`) Stage escalation lacked explicit communication of what changed.
+  - `FN-005` (`P1`) Old `level_speedup` action no longer reliable after random shard placement.
+- Product hypothesis:
+  - Replacing per-level linear growth with stage-based growth (fixed cadence) improves pacing readability and perceived fairness.
+- Gameplay hypothesis:
+  - Increasing enemy count + speed only on stage boundaries (every 4 sectors) creates clearer challenge beats than constant per-level scaling.
+- Input/control hypothesis:
+  - Input stability must remain unchanged after progression refactor.
+- Code changes:
+  - `game.js`
+    - Added stage model:
+      - `LEVELS_PER_STAGE = 4`
+      - `getStageForLevel()`, `getEnemyCountForLevel()`, `getLevelsToNextStage()`
+    - Switched speed scaling to stage-based (`getSpeedScale(level)` depends on stage, not raw level).
+    - Added stage-based enemy-count scaling (4 -> 5 -> 6 ... up to cap), including archetype tiering for extra enemies.
+    - Updated stage milestone logic and messaging:
+      - `Stage X Surge · +1 Enemy · +Speed`
+    - Updated HUD milestone line:
+      - `STAGE X · NEXT @ S{next} ({n} TO GO)`
+    - Updated menu subtitle to explain stage rule:
+      - `Every 4 sectors: +enemy count and +drone speed`.
+    - Added progression telemetry to `render_game_to_text` (`stage`, `levelsPerStage`, `levelsToNextStage`, `enemyCountTarget`).
+  - Test tooling:
+    - Added `scripts/progression_probe.mjs` and wired it into `scripts/validate_round.sh`.
+    - Updated `scripts/run_round_checks.sh` scenario set to `movement_collect`, `pulse_enemy`, `damage_position_lock`, `lose_state`.
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round4`
+- Visual validation:
+  - Gameplay HUD now clearly displays stage countdown: `output/web-game/v3-round4/movement_collect/shot-0.png`.
+  - Progression screenshot shows stage surge text at level 9: `output/web-game/v3-round4/progression/shot.png`.
+  - Mobile menu shows explicit stage rule copy: `output/web-game/v3-round4/mobile-viewport.png`.
+- Functional validation:
+  - Core scenarios pass (`movement_collect`, `pulse_enemy`, `damage_position_lock`, `lose_state`).
+  - Mobile touch probe remains active/playable.
+  - No `errors-*.json` generated.
+- Input validation:
+  - `output/web-game/v3-round4/input-regression/probe.json` all checks pass (Arrow/WASD parity, `A` no pause, `P/R/F` intact).
+- Gameplay validation:
+  - Stage rhythm is now explicit and testable: levels inside same stage keep same speed and enemy count; boundary crossing raises both.
+- Randomness/fairness validation:
+  - `output/web-game/v3-round4/randomness/probe.json` remains healthy:
+    - `uniqueEnemyLayouts=6`, `uniqueShardLayouts=6`
+    - `fairnessPassRate=1`
+    - all dimensions `pass`
+- Regression check:
+  - Round 2/3 seed-random systems and Round 1 input mapping remain intact after stage refactor.
+  - New progression probe confirms expected stage behavior.
+- Result:
+  - PASS
+- Backlog update:
+  - `FN-005` fixed (dedicated progression probe).
+  - `PG-003` moved to `in_progress` (mechanism in place, further tuning needed).
+  - `PG-005` moved to `in_progress` (messaging added, additional readability tuning pending).
+  - `UX-001` fixed.
+- Next round plan:
+  - Round 5 will tune stage balance coefficients and improve fairness under high enemy-count stages (avoid sudden overwhelm while preserving challenge).
+
+### Round 5 - PASS
+- Selected issues:
+  - `PG-004` (`P1`) Level start could still feel abrupt under random/high-pressure opens.
+  - `PG-003` (`P0`, in progress) Stage escalation needed smoother speed slope.
+  - `PG-005` (`P1`, in progress) Stage clarity should include immediate protection/readability feedback.
+- Product hypothesis:
+  - A short level-entry protection window improves perceived fairness without removing challenge, especially as stage pressure rises.
+- Gameplay hypothesis:
+  - Slightly reducing per-stage speed jump and adding adaptive enemy spacing will smooth spikes while retaining stage identity.
+- Input/control hypothesis:
+  - New protection mechanics should not alter established key behavior or state transitions.
+- Code changes:
+  - `game.js`
+    - Tuned stage speed step: `0.16 -> 0.14` for smoother stage-to-stage acceleration.
+    - Added level-entry shield system:
+      - `LEVEL_ENTRY_GRACE = 0.85s`
+      - collision damage disabled while shield is active
+      - shield timer tracked in state (`levelEntryShield`)
+    - Added entry-shield communication:
+      - objective bar text (`Entry Shield Xs`)
+      - temporary protective ring around player.
+    - Added adaptive enemy spawn gap under higher counts to reduce fallback clustering.
+    - Exposed `levelEntryShield` in `render_game_to_text` for QA verification.
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round5`
+  - Additional start-window probe: `web_game_playwright_client` with `test-actions/start_flash.json` to verify shield visibility and timer.
+- Visual validation:
+  - Shield indicator visible in run HUD: `output/web-game/v3-round5/shield_start/shot-0.png`.
+  - Stage HUD/copy remains readable on desktop/mobile snapshots.
+- Functional validation:
+  - Standard scenario set remains valid (`movement_collect`, `pulse_enemy`, `damage_position_lock`, `lose_state`).
+  - Mobile touch flow remains playable and stable.
+  - No `errors-*.json` generated.
+- Input validation:
+  - `output/web-game/v3-round5/input-regression/probe.json` all checks pass (Arrow/WASD/P/R/F + no `A` pause regression).
+- Gameplay validation:
+  - Early run damage fairness improved: shield blocks immediate unavoidable hit chains at level start.
+  - Stage progression still deterministic and clear (`progression/probe.json` passed).
+- Randomness/fairness validation:
+  - `output/web-game/v3-round5/randomness/probe.json` keeps all dimensions passing:
+    - `uniqueEnemyLayouts=6`
+    - `uniqueShardLayouts=6`
+    - `fairnessPassRate=1`
+  - `shield_start/state-0.json` confirms shield active (`levelEntryShield=0.22`) during opening phase.
+- Regression check:
+  - Stage rule from Round 4 and random systems from Rounds 2-3 remain intact.
+  - Input baseline from Round 1 remains intact.
+- Result:
+  - PASS
+- Backlog update:
+  - `PG-004` moved to `in_progress` (major improvement landed, further tuning pending).
+  - `PG-003` and `PG-005` remain `in_progress`.
+- Next round plan:
+  - Round 6 will tune enemy pressure readability and fail explanation around stage spikes (why death happened, what changed this stage).
+
+### Round 6 - PASS
+- Selected issues:
+  - `PG-005` (`P1`) Players still lacked explicit cause-of-failure context.
+  - `PG-003` (`P0`, in progress) Stage pressure readability needed clearer in-run expression.
+  - `PG-004` (`P1`, in progress) Fairness should be explainable, not only numerically balanced.
+- Product hypothesis:
+  - If defeat copy explicitly states stage pressure components (stage index, drone count, speed scale, last hit source), players better understand why the run failed and are more likely to retry intentionally.
+- Gameplay hypothesis:
+  - Displaying speed and drone count together in HUD will improve threat legibility during active play.
+- Input/control hypothesis:
+  - No input regression should appear while expanding telemetry and lose-state messaging.
+- Code changes:
+  - `game.js`
+    - Added per-hit source capture (`lastHitEnemyId`) during collisions.
+    - Extended run summary payload (`stage`, `enemyCount`, `speedScale`, `lastHitEnemyId`).
+    - Reworked lose subtitle to include explicit pressure explanation:
+      - stage, drone count, speed multiplier, impacts taken, last impacting enemy.
+    - Updated HUD threat module to show speed + current drone count together.
+    - Extended `render_game_to_text` with `lastHitEnemyId` + structured `lastRun`.
+  - `scripts/capture_lose_menu.mjs`
+    - Switched from fixed timeout to mode-based wait (`mode === lose`) for reliable lose-menu capture.
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round6`
+  - `node scripts/capture_lose_menu.mjs v3-round6` (post-change lose-summary verification)
+- Visual validation:
+  - Lose summary now visibly includes pressure explanation: `output/web-game/v3-round6/lose-menu/shot.png`.
+  - Gameplay HUD shows updated `THREAT / DRONES` module in run captures.
+- Functional validation:
+  - Standard scenarios pass (`movement_collect`, `pulse_enemy`, `damage_position_lock`, `lose_state`).
+  - Mobile touch probe remains stable.
+  - No `errors-*.json` generated.
+- Input validation:
+  - `output/web-game/v3-round6/input-regression/probe.json` all checks true (Arrow/WASD + `P/R/F` + mixed input + pause/restart continuity).
+- Gameplay validation:
+  - Defeat is now explainable with concrete pressure context, improving fairness perception.
+  - Threat readout in HUD is clearer (`speed scale + drone count` in one module).
+- Randomness/fairness validation:
+  - `output/web-game/v3-round6/randomness/probe.json` remains all-pass:
+    - `uniqueEnemyLayouts=6`, `uniqueShardLayouts=6`, `fairnessPassRate=1`
+  - Stage progression probe remains passing (`output/web-game/v3-round6/progression/probe.json`).
+- Regression check:
+  - Round 1 input baseline intact.
+  - Round 2/3 random systems intact.
+  - Round 4/5 stage and entry-shield systems intact.
+- Result:
+  - PASS
+- Backlog update:
+  - Marked fixed: `PG-005`.
+  - Added polish item `UX-003` (lose summary text density on small viewports).
+- Next round plan:
+  - Round 7 will tune stage economics (reward routing and pacing) by introducing stage-aware shard value signaling to increase "值得冒险去拿" decision pull.
+
+### Round 7 - PASS
+- Selected issues:
+  - `PG-002` follow-up: reward positions were improved, but reward value differentiation was still flat.
+  - `PG-006` (`P2`) Replay motivation needed stronger "worth taking risk" incentives.
+  - `PG-003` (`P0`, in progress) Stage pressure readability benefits from clearer reward trade-off cues.
+- Product hypothesis:
+  - If risky shards are explicitly worth more score, players will make route/risk decisions instead of always taking the nearest shard.
+- Gameplay hypothesis:
+  - Risk-tiered shard values (safe=1, contested=2, risky=3) create meaningful tactical choice without changing clear condition (still 3 shards).
+- Input/control hypothesis:
+  - Reward-system updates should not affect any key/control behavior.
+- Code changes:
+  - `game.js`
+    - Added shard value tiering:
+      - shard objects now carry `value` (`1/2/3`) based on risk target band.
+      - fallback shard generation also assigns values.
+    - Updated scoring:
+      - sector clear progress (`score`) still counts collected shard count.
+      - run score (`totalScore`) now sums shard values.
+    - Added visual value signaling:
+      - shard color palette varies by value tier.
+      - in-canvas value markers (`1/2/3`) rendered on shards.
+      - pickup burst text now shows `+value`.
+    - HUD text changed `TOTAL SHARDS` -> `TOTAL SCORE`.
+    - Menu run summary copy changed from `shards` to `pts`.
+    - Extended `render_game_to_text` shard payload with `value`.
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round7`
+- Visual validation:
+  - `output/web-game/v3-round7/movement_collect/shot-0.png` confirms value markers and `THREAT / DRONES` readout coexist.
+  - Mobile viewport remains stable: `output/web-game/v3-round7/mobile-viewport.png`.
+- Functional validation:
+  - Standard scenario matrix passes; no `errors-*.json`.
+  - Progression and randomness probes still pass.
+  - Mobile touch probe still playable.
+- Input validation:
+  - `output/web-game/v3-round7/input-regression/probe.json` all checks pass.
+- Gameplay validation:
+  - Reward layer now supports explicit trade-offs:
+    - safer shard routes give lower score
+    - riskier contested routes reward higher score
+  - Clear condition remains simple and readable (collect 3 shards), while run score now better reflects risk-taking.
+- Randomness/fairness validation:
+  - `output/web-game/v3-round7/randomness/probe.json`:
+    - `uniqueEnemyLayouts=6`
+    - `uniqueShardLayouts=6`
+    - `fairnessPassRate=1`
+    - all dimensions pass
+- Regression check:
+  - Input (Round 1), seed/random (Rounds 2-3), stage progression (Round 4), and entry-shield fairness (Round 5) all remain intact.
+- Result:
+  - PASS
+- Backlog update:
+  - `PG-006` moved to `in_progress` (motivation improved, more long-run tuning pending).
+  - Added `UX-004` for shard value marker readability polish.
+- Next round plan:
+  - Round 8 will tune stage escalation communication in active play (what changed this stage, current pressure class) and tighten fail-recovery motivation loop.
+
+### Round 8 - PASS
+- Selected issues:
+  - `PG-005` follow-up: stage escalation needed clearer real-time semantics (not just number deltas).
+  - `PG-006` (`P2`, in progress): failure-to-retry loop needed stronger directional CTA.
+  - `UX-003` (`P3`) lose-summary readability density remains a polish concern.
+- Product hypothesis:
+  - If players see a simple pressure class (`STEADY/RISING/SEVERE/CRITICAL`) and targeted retry CTA, stage progression becomes easier to interpret and retry intent improves.
+- Gameplay hypothesis:
+  - Adding pressure-band semantics to stage HUD/milestones and lose summaries improves comprehension of difficulty transitions without altering mechanics.
+- Input/control hypothesis:
+  - Communication-layer changes should not affect any control-state behavior.
+- Code changes:
+  - `game.js`
+    - Added pressure-band model (`getPressureBand`) driven by stage.
+    - Stage surge banner now includes explicit stage pressure class + exact drones + speed value.
+    - HUD stage line now includes pressure band and next-stage countdown.
+    - `render_game_to_text` now includes `pressureBand`.
+    - Lose summary now reports pressure with band label and keeps run diagnostics.
+    - Lose button CTA changed to sector-targeted retry (`Retry S{nextTarget}`).
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round8`
+  - `node scripts/capture_lose_menu.mjs v3-round8`
+- Visual validation:
+  - Lose panel now shows actionable CTA and pressure explanation: `output/web-game/v3-round8/lose-menu/shot.png`.
+  - In-run HUD state payload includes stage + pressure semantics in gameplay captures.
+- Functional validation:
+  - Scenario matrix, randomness probe, progression probe all pass.
+  - No `errors-*.json` generated.
+- Input validation:
+  - `output/web-game/v3-round8/input-regression/probe.json` all checks pass.
+- Gameplay validation:
+  - Stage changes are now semantically readable (`STEADY/RISING/...`) with concrete pressure values.
+  - Failure screen provides clearer reason + immediate sector target for retry.
+- Randomness/fairness validation:
+  - `output/web-game/v3-round8/randomness/probe.json` remains all-pass (`fairnessPassRate=1`, full layout variation).
+- Regression check:
+  - No regression across input, random spawn, stage progression, or entry-shield systems.
+- Result:
+  - PASS
+- Backlog update:
+  - `PG-005` remains fixed and validated under expanded messaging.
+  - `PG-006` stays `in_progress` (motivation loop improved; long-run retention cues still to polish).
+- Next round plan:
+  - Round 9 will improve long-run pacing motivation with lightweight stage-goal rewards and clearer post-stage progression reinforcement.
+
+### Round 9 - PASS
+- Selected issues:
+  - `PG-006` (`P2`, in progress) Needed stronger mid-run progression rewards to sustain replay drive.
+  - `PG-003` (`P0`, in progress) Stage transitions should deliver explicit payoff, not only increased pressure.
+  - `FN-004` (`P2`) Needed stronger QA observability for new reward mechanics.
+- Product hypothesis:
+  - Adding a stage-clear bonus (points) at each stage boundary increases medium-term motivation and gives concrete payoff for surviving pressure spikes.
+- Gameplay hypothesis:
+  - Explicit stage bonus feedback after clearing stage-end sectors improves "next stage push" intent and strengthens run identity.
+- Input/control hypothesis:
+  - Reward/bonus features must not impact key handling stability.
+- Code changes:
+  - `game.js`
+    - Added stage-clear bonus mechanic:
+      - on sector clear where `level % LEVELS_PER_STAGE === 0`, grant bonus points (`2 + stage`).
+      - bonus contributes to `totalScore` and tracked in `stageBonusScore`.
+    - Added stage bonus feedback overlay (`Stage N Bonus +X`) with timer.
+    - Added stage bonus tracking to run summary and text-state output.
+    - Refactored sector clear flow into `handleSectorClear()` for reuse.
+    - Added debug helper `orbDriftDebug.forceClearSector()` for deterministic stage-bonus QA.
+  - Test tooling:
+    - Added `scripts/stage_bonus_probe.mjs`.
+    - Integrated stage-bonus probe into `scripts/validate_round.sh`.
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round9`
+- Visual validation:
+  - Stage bonus overlay confirmed: `output/web-game/v3-round9/stage-bonus/shot.png`.
+  - Gameplay HUD still readable with value shards and threat modules: `output/web-game/v3-round9/movement_collect/shot-0.png`.
+- Functional validation:
+  - Scenario matrix passes; no `errors-*.json`.
+  - New stage-bonus probe passes:
+    - `output/web-game/v3-round9/stage-bonus/probe.json` shows level 4 -> 5 and bonus `+3` applied.
+- Input validation:
+  - `output/web-game/v3-round9/input-regression/probe.json` all checks pass.
+- Gameplay validation:
+  - Stage boundary now provides explicit reward feedback and score gain.
+  - `stageBonusScore` gives players visible evidence of stage mastery, improving repeat-run motivation.
+- Randomness/fairness validation:
+  - `output/web-game/v3-round9/randomness/probe.json` remains fully healthy (`fairnessPassRate=1`, full variation).
+- Regression check:
+  - Progression probe still passes.
+  - Input, random spawn, and mobile touch loops remain stable.
+- Result:
+  - PASS
+- Backlog update:
+  - Added `UX-005` (overlay stacking can become dense during transition windows).
+  - `PG-006` remains `in_progress` for further motivation/UI polish.
+- Next round plan:
+  - Round 10 will resolve transition overlay stacking and improve message hierarchy so stage/bonus/launch signals never compete visually.
+
+### Round 10 - PASS
+- Selected issues:
+  - `UX-005` (`P2`) 转场反馈存在重叠竞争，降低阶段信息可读性。
+  - `PG-006` (`P2`, in progress) 奖励与阶段信号冲突削弱“再来一把”的正反馈。
+  - `PG-003` (`P0`, in progress) 规则需要稳定可感知地表达。
+- Product hypothesis:
+  - 如果转场文案按照优先级顺序展示，玩家更容易读懂“阶段提升 vs 奖励反馈”。
+- Gameplay hypothesis:
+  - 延迟 Stage Bonus 文案并抑制低优先级提示，可减少同屏信息竞争。
+- Input/control hypothesis:
+  - 反馈层改动不应改变输入行为和状态流转。
+- Code changes:
+  - `game.js`
+    - 增加 `stageBonusDelay` 并错峰展示阶段奖励。
+    - 在高优先级阶段提示出现时抑制 `launch/tutorial` 文案。
+    - 为后续反馈层治理建立优先级控制入口。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round10`
+- Visual validation:
+  - 桌面/移动视口与阶段奖励截图均已验证（`output/web-game/v3-round10/*`）。
+- Functional validation:
+  - 场景矩阵通过，无 `errors-*.json`。
+- Input validation:
+  - `output/web-game/v3-round10/input-regression/probe.json` 全通过。
+- Gameplay validation:
+  - 阶段切换信息竞争减少，奖励与阶段变化识别更清晰。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round10/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - 四维均 `pass`
+- Regression check:
+  - `progression/probe.json` 与 `stage-bonus/probe.json` 通过。
+- Result:
+  - PASS
+- Backlog update:
+  - `UX-005` 保持 open，后续继续深化层级治理。
+- Next round plan:
+  - Round 11 优先修复输入焦点切换卡键风险（`IN-003`）。
+
+### Round 11 - PASS
+- Selected issues:
+  - `IN-003` (`P1`) Focus/blur 切换可能导致 keyup 丢失，出现持续移动风险。
+  - `FN-004` (`P2`) 输入异常缺少可脚本化断言。
+  - `PG-006` (`P2`, in progress) 复玩体验依赖输入稳定性，需先补底层可靠性。
+- Product hypothesis:
+  - 若玩家在切屏/失焦后不会发生“角色自己滑动”，失败归因会更公平，重开意愿更稳定。
+- Gameplay hypothesis:
+  - 清理失焦时的按键状态可降低非预期死亡，避免将输入故障误判为难度问题。
+- Input/control hypothesis:
+  - `blur/visibilitychange` 触发时统一清空输入状态，可消除卡键；且不会影响 Arrow/WASD/P/R/F 既有行为。
+- Code changes:
+  - `game.js`
+    - 新增 `clearInputState()`，统一清空 `keysDown/pressedThisFrame` 并移除触控按钮 `active` 状态。
+    - 在 `window.blur` 与 `document.visibilitychange(hidden)` 上接入输入清理。
+    - 增加全局 `pointerup` 兜底，避免触控按钮视觉与真实状态残留。
+  - `scripts/input_regression_probe.mjs`
+    - 新增 `blurClearsHeldMovement` 用例：按住右移后触发 blur，验证角色不再继续移动。
+    - 输出新增 `blurBefore/blurAfter` 样本便于诊断。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round11`
+  - `node scripts/input_regression_probe.mjs v3-round11`（覆盖新 blur 用例）
+- Visual validation:
+  - Desktop: `output/web-game/v3-round11/desktop-viewport.png`
+  - Mobile: `output/web-game/v3-round11/mobile-viewport.png`
+  - Gameplay: `output/web-game/v3-round11/movement_collect/shot-0.png`（进入实战场景）
+- Functional validation:
+  - 开始、移动、碰撞、失败流程均通过（`movement_collect`, `pulse_enemy`, `damage_position_lock`, `lose_state`）。
+  - `errors-*.json` 未发现。
+- Input validation:
+  - `output/web-game/v3-round11/input-regression/probe.json` 全量通过：
+    - Arrow/WASD、混用、`A` 不暂停、`P` 暂停恢复、`R` 重开、`F` 后输入持续可用。
+    - 新增 `blurClearsHeldMovement=true`，卡键风险未复现。
+- Gameplay validation:
+  - 失焦恢复后操作行为一致，降低“非操作失误导致受击”的不公平感。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round11/randomness/probe.json`：
+    - `uniqueEnemyLayouts=6`
+    - `uniqueShardLayouts=6`
+    - `fairnessPassRate=1`
+    - 四维（fairness/variation/readability/replayability）均为 pass。
+- Regression check:
+  - `progression/probe.json` 与 `stage-bonus/probe.json` 继续通过。
+  - 输入基线（Round 1）与 `A` 冲突修复无回退。
+- Result:
+  - PASS
+- Backlog update:
+  - `IN-003` 从 `open -> fixed`。
+  - `FN-004` 保持 `open`（下一轮补充随机/生成遥测字段）。
+- Next round plan:
+  - Round 12 聚焦 `FN-004`：在 `render_game_to_text` 增加随机生成公平性诊断字段，提升 QA 可解释性。
+
+### Round 12 - PASS
+- Selected issues:
+  - `PG-001` (`P0`, in progress) 敌人仍可能出现方向聚团，影响读图与开局公平。
+  - `FN-004` (`P2`) 缺少生成公平性遥测，QA 难以定位随机回归根因。
+  - `PG-006` (`P2`, in progress) 复玩稳定性依赖“随机有变化但不灾难”的底线。
+- Product hypothesis:
+  - 如果敌人出生在玩家周围角度上更分散，玩家更容易读懂压力来源，减少“无解开局”感受。
+- Gameplay hypothesis:
+  - 加入角度分桶约束能降低同方向聚团；若约束过硬，需保留放宽重采样通道防止 fallback 固化。
+- Input/control hypothesis:
+  - 出生逻辑与遥测扩展不应影响 Arrow/WASD 与 `P/R/F` 行为。
+- Code changes:
+  - `game.js`
+    - 敌人出生新增角度分桶约束（`ENEMY_ANGLE_BUCKETS=6`），优先分散玩家正前方压力。
+    - 为避免约束过硬导致 fallback 固化，新增二次放宽重采样（保留安全距离+最小间距，放宽角度桶限制）。
+    - 新增 `buildSpawnDiagnostics()`，记录：
+      - `playerEnemyMinDist`
+      - `enemyEnemyMinDist`
+      - `enemySpread`
+      - `nearestShardToPlayer`
+      - `shardEnemyMinDist`
+      - `enemyAngleBuckets`
+    - `spawnLevel()` 时计算并缓存 `state.spawnDiagnostics`。
+    - `render_game_to_text` 输出新增 `spawnDiagnostics`。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round12`
+  - 首次运行发现随机公平回归（`fairnessPassRate=0.5`），随后修正生成逻辑并完整重跑 `scripts/validate_round.sh v3-round12`。
+- Visual validation:
+  - Desktop: `output/web-game/v3-round12/desktop-viewport.png`
+  - Mobile: `output/web-game/v3-round12/mobile-viewport.png`
+  - Gameplay: `output/web-game/v3-round12/movement_collect/shot-0.png`
+- Functional validation:
+  - `movement_collect/pulse_enemy/damage_position_lock/lose_state` 全通过。
+  - 新增 `spawnDiagnostics` 已在 `state-0.json` 中可见且数值有效。
+  - 无 `errors-*.json`。
+- Input validation:
+  - `output/web-game/v3-round12/input-regression/probe.json` 全部检查通过（含 `blurClearsHeldMovement`）。
+- Gameplay validation:
+  - 敌人初始分布可读性更好，且通过放宽二次采样避免固定 fallback 点导致的灾难局。
+- Randomness/fairness validation:
+  - 修正后 `output/web-game/v3-round12/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - `uniqueEnemyLayouts=6`
+    - `uniqueShardLayouts=6`
+    - 四维（fairness/variation/readability/replayability）均 `pass`。
+- Regression check:
+  - `progression/probe.json` 与 `stage-bonus/probe.json` 继续通过。
+  - 输入与移动端触控探针通过，未破坏 Round 11 输入稳态修复。
+- Result:
+  - PASS
+- Backlog update:
+  - `FN-004` 从 `open -> fixed`。
+  - `PG-001` 保持 `in_progress`，后续继续观察高阶段敌人数下的聚团概率。
+- Next round plan:
+  - Round 13 聚焦奖励生成“可达且值得冒险”平衡：减少极端无意义高危点，同时保留决策性。
+
+### Round 13 - PASS
+- Selected issues:
+  - `PG-002` follow-up: 奖励点在高阶段可能过远或角度过于同线，决策价值下降。
+  - `PG-006` (`P2`, in progress): 需要让“冒险拿高价值 shard”在中后期仍然可执行。
+  - `PG-001` (`P0`, in progress): 敌人与奖励空间关系要保持可读，不应互相放大为灾难局。
+- Product hypothesis:
+  - 奖励风险目标若随阶段轻度自适应，能保持“有风险但值得去拿”，避免后期经常刷成不值当的极端点。
+- Gameplay hypothesis:
+  - 对奖励角度做分散偏好（而非硬拒绝）可以促进路线抉择，减少单通道扫图。
+- Input/control hypothesis:
+  - 奖励生成策略修改不应影响 Arrow/WASD 与 `P/R/F` 行为一致性。
+- Code changes:
+  - `game.js`
+    - 新增 `getShardRiskTargets(level)`：按 stage 轻度抬高目标敌人距离，降低后期“近乎自杀点”概率。
+    - 新增 `getShardDistanceBounds(level)`：后期逐步收紧奖励最远生成距离，避免无意义远端点。
+    - `pickShardSpawn()` 引入角度分散偏好：
+      - 增加 `smallestAngleDiff()` 与 `SHARD_ANGLE_MIN_SEPARATION`；
+      - 对与既有 shard 角度过近的候选增加评分惩罚（soft penalty），保留可解性。
+    - `buildLevelShards()` 接入阶段自适应风险目标与距离边界。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round13`
+- Visual validation:
+  - Desktop: `output/web-game/v3-round13/desktop-viewport.png`
+  - Mobile: `output/web-game/v3-round13/mobile-viewport.png`
+  - Gameplay: `output/web-game/v3-round13/movement_collect/shot-0.png`（奖励点角度分布更分散）
+- Functional validation:
+  - `movement_collect/pulse_enemy/damage_position_lock/lose_state` 全通过。
+  - `errors-*.json` 未发现。
+- Input validation:
+  - `output/web-game/v3-round13/input-regression/probe.json` 全通过（含 `blurClearsHeldMovement`）。
+- Gameplay validation:
+  - 奖励点在空间上更易形成“先拿哪一个”的路径博弈，高价值点不再频繁落入后期极端无意义位置。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round13/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - 四维（fairness/variation/readability/replayability）全 `pass`
+    - `avgNearestShardToPlayer=227.19`（较 Round 12 更接近有效决策区间）。
+- Regression check:
+  - `progression/probe.json` 与 `stage-bonus/probe.json` 通过。
+  - 输入与移动端触控流程保持稳定。
+- Result:
+  - PASS
+- Backlog update:
+  - `PG-002` 保持 `fixed`，补充 Round 13 策略说明。
+  - `PG-006` 继续 `in_progress`（后续补“阶段目标感”反馈）。
+- Next round plan:
+  - Round 14 打磨阶段曲线本身：继续优化“每 4 关提升”的速度增幅分段，降低中后期突兀感。
+
+### Round 14 - PASS
+- Selected issues:
+  - `PG-003` (`P0`, in progress) 速度按 stage 线性增长在中后期偏陡，容易把挑战推向不公平。
+  - `PG-006` (`P2`, in progress) 玩家需要更清楚地感知“本阶段速度加了多少”。
+  - `UX-005` (`P2`) 阶段提示需要更信息化但不冗余。
+- Product hypothesis:
+  - 若速度增幅改为分段（前期快、后期缓），能维持成长感同时减少后期突兀压制。
+- Gameplay hypothesis:
+  - 保持“每 4 关升一次”的规则不变，仅调整每阶段速度增量形状，可平滑难度曲线且不破坏可感知性。
+- Input/control hypothesis:
+  - 数值曲线改动不应影响 Arrow/WASD 与 `P/R/F` 输入回归结果。
+- Code changes:
+  - `game.js`
+    - 将速度成长从固定步长改为分段步长：
+      - Early stages: `+0.14`
+      - Mid stages: `+0.11`
+      - Late stages: `+0.08`
+    - 新增 `getStageSpeedIncrement/getSpeedScaleForStage/getStageSpeedDelta`。
+    - `getSpeedScale` 改为按 stage 累积并继续受 `MAX_ENEMY_SPEED_SCALE` 上限约束。
+    - 里程碑提示追加阶段速度增量信息：`(Δ+X.XX)`。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round14`
+- Visual validation:
+  - Desktop: `output/web-game/v3-round14/desktop-viewport.png`
+  - Mobile: `output/web-game/v3-round14/mobile-viewport.png`
+  - Stage transition feedback: `output/web-game/v3-round14/stage-bonus/shot.png`（含 `Δ+0.14`）
+- Functional validation:
+  - 主流程场景全通过；无 `errors-*.json`。
+- Input validation:
+  - `output/web-game/v3-round14/input-regression/probe.json` 全通过（Arrow/WASD/混用/P/R/F/blur）。
+- Gameplay validation:
+  - 阶段提升仍清晰可感知，且后续阶段速度增长被软化，降低后期突刺不公平风险。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round14/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - 四维全部 `pass`
+  - 速度曲线调整未破坏随机公平性。
+- Regression check:
+  - `progression/probe.json` 通过，确认规则仍是“每 4 关提升速度与敌人数”。
+  - `stage-bonus/probe.json`、移动端触控、输入回归继续通过。
+- Result:
+  - PASS
+- Backlog update:
+  - `PG-003` 保持 `in_progress`，已完成分段增幅，后续继续打磨高阶段体感。
+- Next round plan:
+  - Round 15 优化开场保护随阶段缩放，平衡“后期公平性 vs 压力感”（`PG-004`）。
+
+### Round 15 - PASS
+- Selected issues:
+  - `PG-004` (`P1`, in progress) 开场保护固定时长在高阶段要么过短不公平、要么过长削弱压力感。
+  - `PG-003` (`P0`, in progress) 难度曲线已分段，需要与开场公平机制联动。
+  - `FN-004` follow-up: 需要在文本态看到保护总时长，便于 QA 复盘。
+- Product hypothesis:
+  - 开场保护按阶段自适应可同时保证公平与节奏，不会在后期变成“无敌缓冲”。
+- Gameplay hypothesis:
+  - 保护总时长随 stage 下降，并在极高敌人数阶段给小幅补偿，可减少“秒杀开局”且保持挑战。
+- Input/control hypothesis:
+  - 防护窗逻辑调整不应影响 Arrow/WASD、`A` 冲突修复和 `P/R/F` 行为。
+- Code changes:
+  - `game.js`
+    - 新增 `getEntryShieldDuration(level)`：
+      - 基础随 stage 递减；
+      - 高敌人数（>=8）增加小幅补偿；
+      - 下限 `0.58s`，上限 `0.85s`。
+    - 新增状态 `levelEntryShieldTotal`，并在 `spawnLevel()` 时设置：
+      - `levelEntryShieldTotal = getEntryShieldDuration(level)`
+      - `levelEntryShield = levelEntryShieldTotal`
+    - 玩家护盾环动画比例改为基于 `levelEntryShieldTotal`（不再硬编码常量）。
+    - `render_game_to_text` 新增 `levelEntryShieldTotal`。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round15`
+- Visual validation:
+  - Desktop: `output/web-game/v3-round15/desktop-viewport.png`
+  - Mobile: `output/web-game/v3-round15/mobile-viewport.png`
+  - Gameplay: `output/web-game/v3-round15/movement_collect/shot-0.png`
+- Functional validation:
+  - 场景矩阵全通过，无 `errors-*.json`。
+  - `state-0.json` 包含 `levelEntryShieldTotal` 字段。
+- Input validation:
+  - `output/web-game/v3-round15/input-regression/probe.json` 全通过（含 `blurClearsHeldMovement`）。
+- Gameplay validation:
+  - 开场保护仍存在且可感知；机制从固定时长变为阶段自适应，更符合“越后期越紧张但不失公平”目标。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round15/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - 四维全部 `pass`
+  - 保护时长改动未破坏随机公平性与复玩性。
+- Regression check:
+  - `progression/probe.json` 与 `stage-bonus/probe.json` 通过。
+  - 输入回归与移动端触控回归继续通过。
+- Result:
+  - PASS
+- Backlog update:
+  - `PG-004` 保持 `in_progress`（完成阶段自适应，后续继续打磨 HUD 表达与后期体验）。
+- Next round plan:
+  - Round 16 处理失败面板信息密度（`UX-003`），提高移动端可读性并保持失败解释力。
+
+### Round 16 - PASS
+- Selected issues:
+  - `UX-003` (`P3`) 失败摘要在小屏和高信息量场景下过密，阅读成本高。
+  - `PG-006` (`P2`, in progress) 失败后“为什么输、下次怎么打”仍需更快可理解。
+  - `PG-004` (`P1`, in progress) 开场公平机制需要在失败页有更直接的归因反馈。
+- Product hypothesis:
+  - 失败页改为“分行结构化解释”可显著提升可读性和重开行动效率。
+- Gameplay hypothesis:
+  - 若失败原因被归类（过载/高阶段速度/路线切换碰撞），玩家更容易形成下一局策略，而不是把失败归咎随机。
+- Input/control hypothesis:
+  - 失败页文案重构不应影响输入与状态流转。
+- Code changes:
+  - `game.js`
+    - 重写 lose 状态摘要生成逻辑：
+      - 行 1：到达关卡、得分、时长
+      - 行 2：失败原因（cause label）+ 命中次数 + 最后命中敌人
+      - 行 3：阶段压力（stage/band/drone/speed）
+      - 行 4：下一目标关卡 + 精简策略提示
+    - 失败提示文案从长段落改为多行结构化信息。
+  - `styles.css`
+    - `menu-subtitle` 支持 `white-space: pre-line`。
+    - lose 状态下单独减小字号/行高，提升密集信息可读性。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round16`
+  - `node scripts/capture_lose_menu.mjs v3-round16`（专门核对失败页可读性）
+- Visual validation:
+  - Desktop: `output/web-game/v3-round16/desktop-viewport.png`
+  - Mobile: `output/web-game/v3-round16/mobile-viewport.png`
+  - Lose panel: `output/web-game/v3-round16/lose-menu/shot.png`
+- Functional validation:
+  - 场景矩阵通过；无 `errors-*.json`。
+  - 失败态按钮仍为 `Retry Sx`，状态流转正常。
+- Input validation:
+  - `output/web-game/v3-round16/input-regression/probe.json` 全通过（Arrow/WASD、`A` 无冲突、`P/R/F`、blur 清理）。
+- Gameplay validation:
+  - 玩家能更快识别“为何失败 + 下轮目标”，提升重开策略性与可解释性。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round16/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - 四维全部 `pass`
+- Regression check:
+  - `output/web-game/v3-round16/progression/probe.json` 通过，新增 `entryShieldScalesByStage=true`（L1 0.85 -> L5 0.81 -> L9 0.77）。
+  - `stage-bonus/probe.json`、移动端触控探针继续通过。
+- Result:
+  - PASS
+- Backlog update:
+  - `UX-003` 从 `open -> fixed`。
+- Next round plan:
+  - Round 17 提升奖励价值标记和关键信息对比度（`UX-004`），确保中高压局仍能快速识别高价值目标。
+
+### Round 17 - PASS
+- Selected issues:
+  - `UX-004` (`P3`) shard 价值标记在复杂场景下识别速度不够。
+  - `PG-006` (`P2`, in progress) 奖励取舍需要更直观的视觉信号支撑决策。
+  - `PG-002` follow-up: 奖励系统虽平衡，但高价值目标还可再强化可读性。
+- Product hypothesis:
+  - 价值信号若能在高压战斗中一眼识别，会提升“值不值得去拿”的实时决策质量。
+- Gameplay hypothesis:
+  - 强化 `value=3` 视觉优先级（描边+脉冲环）可增加高风险高回报目标的吸引力，提升路线博弈。
+- Input/control hypothesis:
+  - 视觉增强不应影响任意输入逻辑和状态流转。
+- Code changes:
+  - `game.js`
+    - shard 数字标记升级：
+      - 更大字号（`12/13px`）；
+      - 深色描边 + 高亮填充，提高复杂背景可读性。
+    - `value=3` shard 新增脉冲虚线环，提升高价值目标可见性。
+    - HUD 增加轻量价值图例：`1 COOL · 2 WARM · 3 HOT`。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round17`
+- Visual validation:
+  - Desktop gameplay: `output/web-game/v3-round17/movement_collect/shot-0.png`
+  - Desktop viewport: `output/web-game/v3-round17/desktop-viewport.png`
+  - Mobile viewport: `output/web-game/v3-round17/mobile-viewport.png`
+- Functional validation:
+  - 场景矩阵通过，无 `errors-*.json`。
+- Input validation:
+  - `output/web-game/v3-round17/input-regression/probe.json` 全通过（Arrow/WASD/`P/R/F`/blur）。
+- Gameplay validation:
+  - 高价值 shard 的识别优先级更高，奖励路线决策更直接。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round17/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - 四维均 `pass`
+- Regression check:
+  - `progression/probe.json` 通过（含 `entryShieldScalesByStage`）。
+  - `stage-bonus/probe.json` 与移动端触控探针继续通过。
+- Result:
+  - PASS
+- Backlog update:
+  - `UX-004` 从 `open -> fixed`。
+- Next round plan:
+  - Round 18 处理过渡反馈层级冲突（`UX-005`），确保 stage/bonus/clear/launch 不争抢注意力。
+
+### Round 18 - PASS
+- Selected issues:
+  - `UX-005` (`P2`) stage/bonus/clear 在过渡窗口存在竞争显示。
+  - `PG-003` (`P0`, in progress) 阶段提升需要“单一主信号”，避免认知噪声。
+  - `PG-006` (`P2`, in progress) 玩家应能明确当前最重要反馈，不被多条文案抢焦点。
+- Product hypothesis:
+  - 反馈层按优先级互斥显示可提升节奏可读性，减少“看到了但没理解”的状态切换噪声。
+- Gameplay hypothesis:
+  - 若里程碑、阶段奖励、清关文本分时展示，玩家能更清晰感知阶段变化与奖励反馈。
+- Input/control hypothesis:
+  - 反馈层次调整不应影响输入和状态机行为。
+- Code changes:
+  - `game.js`
+    - 新增反馈可见性优先级：
+      - `milestone` > `stageBonus` > `clearText` > `launch/tutorial`
+    - `clearFlash` 在高优先级阶段仅保留轻量扫光，不再绘制“Sector Cleared”文案。
+    - `stageBonusFlash` 改为在 `milestone` 结束后再衰减，避免奖励提示被提前吞没。
+    - `showMilestone/showStageBonus/showClearText` 统一用于控制 overlay 互斥显示。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round18`
+- Visual validation:
+  - Stage transition: `output/web-game/v3-round18/stage-bonus/shot.png`
+  - Desktop viewport: `output/web-game/v3-round18/desktop-viewport.png`
+  - Mobile viewport: `output/web-game/v3-round18/mobile-viewport.png`
+- Functional validation:
+  - 场景矩阵通过，无 `errors-*.json`。
+- Input validation:
+  - `output/web-game/v3-round18/input-regression/probe.json` 全通过。
+- Gameplay validation:
+  - 过渡时主反馈更聚焦，阶段提示可读性提升。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round18/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - 四维均 `pass`
+- Regression check:
+  - `progression/probe.json` 通过（含 `entryShieldScalesByStage`）。
+  - `stage-bonus/probe.json` 与移动端触控回归通过。
+- Result:
+  - PASS
+- Backlog update:
+  - `UX-005` 进入 `in_progress -> almost done`（下一轮补“阶段奖励延后可见性”验证闭环）。
+- Next round plan:
+  - Round 19 加入复玩驱动机制（clean sweep bonus），并补足 stage-bonus 转场后可见性验证。
+
+### Round 19 - PASS
+- Selected issues:
+  - `PG-006` (`P2`, in progress) 复玩动机仍需轻量成长反馈。
+  - `UX-005` (`P2`, in progress) 需要确认阶段奖励在转场后仍稳定可见。
+  - `FN-004` follow-up: 文本态需要记录 clean-run 相关状态，便于 QA 可复现验证。
+- Product hypothesis:
+  - 增加“零受击通关”小奖励可强化技能表达与再来一局动力，而不破坏主循环平衡。
+- Gameplay hypothesis:
+  - `Clean Sweep +1`（每关零受击）可鼓励路线规划和操作稳定性，形成可追求的小目标层。
+- Input/control hypothesis:
+  - 加分机制与 HUD 文案扩展不应影响任何键位行为。
+- Code changes:
+  - `game.js`
+    - 新增 `sectorDamageTaken`、`cleanSweepScore`。
+    - 每关开场重置 `sectorDamageTaken`；受击时累加。
+    - 清关时若 `sectorDamageTaken===0`：
+      - `totalScore += 1`
+      - `cleanSweepScore += 1`
+      - 触发 `Clean +1` 漂字反馈。
+    - HUD 新增 `CLEAN SWEEP +X`。
+    - `render_game_to_text` 新增 `cleanSweepScore/sectorDamageTaken` 与 `lastRun.cleanSweepScore`。
+    - 失败摘要首行可显示 `Clean +X`（若存在）。
+  - `scripts/stage_bonus_probe.mjs`
+    - 新增延迟后状态校验 `bonusPersistsAfterTransition`。
+    - 产物新增 `shot-early.png` 与延后截图 `shot.png`，验证转场后奖励提示可见。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round19`
+- Visual validation:
+  - Gameplay: `output/web-game/v3-round19/movement_collect/shot-0.png`（HUD 含 `CLEAN SWEEP +0`）
+  - Stage bonus early/late:
+    - `output/web-game/v3-round19/stage-bonus/shot-early.png`
+    - `output/web-game/v3-round19/stage-bonus/shot.png`
+  - Desktop/mobile viewport 均已生成。
+- Functional validation:
+  - 场景矩阵通过；`stage_bonus_probe` 新增校验项通过。
+- Input validation:
+  - `output/web-game/v3-round19/input-regression/probe.json` 全通过（Arrow/WASD/P/R/F/blur）。
+- Gameplay validation:
+  - 新增 `Clean Sweep` 提供稳定可追求的小目标，提高复玩驱动力。
+  - 阶段奖励在转场后仍可见且不与阶段提示冲突。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round19/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - 四维均 `pass`
+- Regression check:
+  - `progression/probe.json` 通过（含 entry shield stage-scaling）。
+  - `stage-bonus/probe.json` 通过（含 `bonusPersistsAfterTransition=true`）。
+- Result:
+  - PASS
+- Backlog update:
+  - `UX-005` 标记为 `fixed`。
+  - `PG-006` 继续 `in_progress`（最后一轮做闭环总结和低优先项归档）。
+- Next round plan:
+  - Round 20 做最终一轮玩法闭环：强化起始目标教学与阶段目标提示，完成最终回归与总交付。
+
+### Round 20 - PASS
+- Selected issues:
+  - `PG-006` (`P2`, in progress) 复玩驱动需要更明确的“本局可追求目标”提示。
+  - `UX-002` (`P2`) 开局信息应更直接传达玩法目标，而不只是键位说明。
+  - `PG-004` (`P1`, in progress) 开场公平机制需要被玩家即时感知（不仅存在于底层数值）。
+- Product hypothesis:
+  - 把 `Clean Sweep +1` 前置到菜单与关内目标栏，能增强目标感、阶段感和再来一把动机。
+- Gameplay hypothesis:
+  - 当玩家实时知道“本关 clean bonus 仍激活/已失效”，会主动做风险决策而不是被动躲避。
+- Input/control hypothesis:
+  - 目标文案增强不应影响双键位与状态切换稳定性。
+- Code changes:
+  - `game.js`
+    - 菜单简介补充 `Clean sector (no hits): +1 score`。
+    - 关内目标栏从单行改为双行：
+      - 行 1：剩余 shard 目标
+      - 行 2：`Clean bonus armed (+1)` / `Clean bonus lost this sector`
+    - 目标栏高度与定位微调，保证信息可读。
+  - `index.html`
+    - 初始静态 `menu-subtitle` 同步为含 clean bonus 的版本，避免首帧文案与运行时不一致。
+- Test scenarios used:
+  - `scripts/validate_round.sh v3-round20`
+- Visual validation:
+  - Desktop menu: `output/web-game/v3-round20/desktop-viewport.png`
+  - Mobile menu: `output/web-game/v3-round20/mobile-viewport.png`
+  - Gameplay objective bar: `output/web-game/v3-round20/movement_collect/shot-0.png`
+  - Stage bonus transition: `output/web-game/v3-round20/stage-bonus/shot.png`
+- Functional validation:
+  - 场景矩阵通过；`stage_bonus_probe` 通过且含 `bonusPersistsAfterTransition=true`。
+  - 无 `errors-*.json`。
+- Input validation:
+  - `output/web-game/v3-round20/input-regression/probe.json` 全通过：
+    - Arrow/WASD、混用、`A` 不暂停、`P` 暂停恢复、`R` 重开、`F` 全屏后输入持续、blur 清理。
+- Gameplay validation:
+  - 菜单与关内目标统一强调 clean bonus，玩家对“本关该做什么”更清晰。
+  - clean 状态实时反馈提升路线与风险管理决策感。
+- Randomness/fairness validation:
+  - `output/web-game/v3-round20/randomness/probe.json`：
+    - `fairnessPassRate=1`
+    - 四维全部 `pass`
+- Regression check:
+  - `output/web-game/v3-round20/progression/probe.json` 通过（每 4 关升级规则 + entry shield 分阶段缩放）。
+  - `output/web-game/v3-round20/stage-bonus/probe.json` 通过（阶段奖励延后后仍稳定显示）。
+  - 移动端触控探针通过。
+- Result:
+  - PASS
+- Backlog update:
+  - 20 轮计划完成；高优先级项均无阻塞，保留若干中低优先级精修项作后续版本候选。
+- Next round plan:
+  - Program complete (Rounds 1-20 finished).

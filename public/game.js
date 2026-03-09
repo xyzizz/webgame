@@ -19,16 +19,21 @@
   const MAX_PLAYER_HP = 5;
   const GOAL_SHARDS = 3;
   const MAX_LEVEL = 100;
-  const ENEMY_SPEED_STEP = 0.09;
+  const LEVELS_PER_STAGE = 4;
+  const EARLY_STAGE_SPEED_STEP = 0.14;
+  const MID_STAGE_SPEED_STEP = 0.11;
+  const LATE_STAGE_SPEED_STEP = 0.08;
+  const MAX_ENEMIES = 9;
+  const LEVEL_ENTRY_GRACE = 0.85;
 
-  const BASE_ENEMIES = [
-    { id: "E1", x: 300, y: 244, r: 15, speed: 95, hp: 1 },
-    { id: "E2", x: 632, y: 314, r: 15, speed: 110, hp: 2 },
-    { id: "E3", x: 838, y: 132, r: 15, speed: 124, hp: 2 },
-    { id: "E4", x: 834, y: 418, r: 15, speed: 118, hp: 2 },
+  const ENEMY_ARCHETYPES = [
+    { id: "E1", fallbackX: 300, fallbackY: 244, r: 15, speed: 95, hp: 1 },
+    { id: "E2", fallbackX: 632, fallbackY: 314, r: 15, speed: 110, hp: 2 },
+    { id: "E3", fallbackX: 838, fallbackY: 132, r: 15, speed: 124, hp: 2 },
+    { id: "E4", fallbackX: 834, fallbackY: 418, r: 15, speed: 118, hp: 2 },
   ];
 
-  const SHARD_PATTERNS = [
+  const FALLBACK_SHARD_PATTERNS = [
     [
       { id: "S1", x: 220, y: 270, r: 8 },
       { id: "S2", x: 360, y: 270, r: 8 },
@@ -57,13 +62,13 @@
     };
   });
 
-  const MAX_BASE_ENEMY_SPEED = Math.max(...BASE_ENEMIES.map((enemy) => enemy.speed));
+  const MAX_BASE_ENEMY_SPEED = Math.max(...ENEMY_ARCHETYPES.map((enemy) => enemy.speed));
   const MAX_ENEMY_SPEED_SCALE = PLAYER_SPEED / MAX_BASE_ENEMY_SPEED;
   const DESKTOP_CONTROL_CHIPS = [
-    { key: "Arrows", label: "Drift" },
+    { key: "Arrows / WASD", label: "Drift" },
     { key: "Space", label: "Pulse" },
-    { key: "P / A", label: "Pause" },
-    { key: "R / B", label: "Restart" },
+    { key: "P", label: "Pause" },
+    { key: "R", label: "Restart" },
     { key: "F", label: "Fullscreen" },
   ];
   const TOUCH_CONTROL_CHIPS = [
@@ -73,6 +78,44 @@
     { key: "RESTART", label: "Retry" },
     { key: "Tap Btns", label: "Touch" },
   ];
+  const ENEMY_SPAWN_MARGIN = 36;
+  const ENEMY_PLAYER_SAFE_DIST = 170;
+  const ENEMY_MIN_GAP = 92;
+  const ENEMY_MIN_X_FROM_PLAYER = 132;
+  const ENEMY_ANGLE_BUCKETS = 6;
+  const SHARD_SPAWN_MARGIN = 34;
+  const SHARD_MIN_GAP = 88;
+  const SHARD_MIN_X_FROM_PLAYER = 78;
+  const SHARD_MIN_PLAYER_DIST = 118;
+  const SHARD_MAX_PLAYER_DIST = 560;
+  const SHARD_ENEMY_MIN_DIST = 66;
+  const SHARD_ENEMY_MAX_DIST = 280;
+  const SHARD_RISK_TARGETS = [192, 138, 102];
+  const SHARD_ANGLE_MIN_SEPARATION = 0.42;
+  const DEFAULT_DEBUG_SEED = 20260309;
+
+  function normalizeSeed(value) {
+    if (!Number.isFinite(value)) return DEFAULT_DEBUG_SEED;
+    return (Math.abs(Math.floor(value)) >>> 0) || 1;
+  }
+
+  function createRng(seed) {
+    let stateSeed = normalizeSeed(seed);
+    return () => {
+      stateSeed = (Math.imul(stateSeed, 1664525) + 1013904223) >>> 0;
+      return stateSeed / 4294967296;
+    };
+  }
+
+  function mixSeed(base, salt) {
+    let x = normalizeSeed(base ^ salt);
+    x ^= x >>> 16;
+    x = Math.imul(x, 2246822507);
+    x ^= x >>> 13;
+    x = Math.imul(x, 3266489909);
+    x ^= x >>> 16;
+    return normalizeSeed(x);
+  }
 
   const state = {
     mode: "menu",
@@ -83,20 +126,33 @@
     goal: GOAL_SHARDS,
     elapsed: 0,
     levelBannerTimer: 0,
+    levelEntryShield: 0,
+    levelEntryShieldTotal: LEVEL_ENTRY_GRACE,
     damageFlash: 0,
     pickupBursts: [],
     clearFlash: 0,
     clearLevel: 0,
+    stageBonusFlash: 0,
+    stageBonusDelay: 0,
+    stageBonusPoints: 0,
+    stageBonusStage: 0,
     milestoneFlash: 0,
     milestoneLevel: 0,
     milestoneLabel: "",
     launchFlash: 0,
     damageTaken: 0,
+    sectorDamageTaken: 0,
+    stageBonusScore: 0,
+    cleanSweepScore: 0,
     tutorialMoveHint: true,
     tutorialPulseHint: true,
     nearestEnemyDist: Infinity,
     bestLevel: 1,
     lastRun: null,
+    lastHitEnemyId: null,
+    spawnDiagnostics: null,
+    runSeed: DEFAULT_DEBUG_SEED,
+    seedOverride: null,
     player: makePlayer(),
     enemies: [],
     shards: [],
@@ -117,42 +173,312 @@
     };
   }
 
-  function getSpeedScale() {
-    const scaled = 1 + (state.level - 1) * ENEMY_SPEED_STEP;
-    return Math.min(scaled, MAX_ENEMY_SPEED_SCALE);
+  function getStageForLevel(level = state.level) {
+    return Math.floor((Math.max(1, level) - 1) / LEVELS_PER_STAGE) + 1;
+  }
+
+  function getEnemyCountForLevel(level = state.level) {
+    const stage = getStageForLevel(level);
+    return Math.min(MAX_ENEMIES, ENEMY_ARCHETYPES.length + (stage - 1));
+  }
+
+  function getLevelsToNextStage(level = state.level) {
+    const progressInStage = (Math.max(1, level) - 1) % LEVELS_PER_STAGE;
+    return LEVELS_PER_STAGE - 1 - progressInStage;
+  }
+
+  function getPressureBand(level = state.level) {
+    const stage = getStageForLevel(level);
+    if (stage >= 6) return "CRITICAL";
+    if (stage >= 4) return "SEVERE";
+    if (stage >= 2) return "RISING";
+    return "STEADY";
+  }
+
+  function getStageSpeedIncrement(stage) {
+    if (stage <= 1) return 0;
+    if (stage <= 4) return EARLY_STAGE_SPEED_STEP;
+    if (stage <= 7) return MID_STAGE_SPEED_STEP;
+    return LATE_STAGE_SPEED_STEP;
+  }
+
+  function getSpeedScaleForStage(stage) {
+    let scale = 1;
+    for (let s = 2; s <= stage; s += 1) {
+      scale += getStageSpeedIncrement(s);
+    }
+    return Math.min(scale, MAX_ENEMY_SPEED_SCALE);
+  }
+
+  function getStageSpeedDelta(level = state.level) {
+    const stage = getStageForLevel(level);
+    if (stage <= 1) return 0;
+    return Math.max(0, getSpeedScaleForStage(stage) - getSpeedScaleForStage(stage - 1));
+  }
+
+  function getSpeedScale(level = state.level) {
+    return getSpeedScaleForStage(getStageForLevel(level));
   }
 
   function getNextMilestoneLevel(level) {
     if (level >= state.maxLevel) return state.maxLevel;
-    if (level < 2) return Math.min(state.maxLevel, 2);
-    if (level % 10 === 0) return Math.min(state.maxLevel, level + 10);
-    return Math.min(state.maxLevel, Math.ceil(level / 10) * 10);
+    const stage = getStageForLevel(level);
+    const nextStageStart = stage * LEVELS_PER_STAGE + 1;
+    return Math.min(state.maxLevel, nextStageStart);
+  }
+
+  function getEntryShieldDuration(level = state.level) {
+    const stage = getStageForLevel(level);
+    const softened = LEVEL_ENTRY_GRACE - Math.max(0, stage - 1) * 0.04;
+    const pressureComp = getEnemyCountForLevel(level) >= 8 ? 0.05 : 0;
+    return Math.max(0.58, Math.min(LEVEL_ENTRY_GRACE, softened + pressureComp));
+  }
+
+  function randomBetween(rng, min, max) {
+    return min + rng() * (max - min);
+  }
+
+  function smallestAngleDiff(a, b) {
+    const diff = Math.abs(a - b) % (Math.PI * 2);
+    return diff > Math.PI ? Math.PI * 2 - diff : diff;
+  }
+
+  function getShardRiskTargets(level = state.level) {
+    const stage = getStageForLevel(level);
+    const safetyShift = Math.min(20, Math.max(0, stage - 1) * 5);
+    return SHARD_RISK_TARGETS.map((dist, index) =>
+      Math.min(SHARD_ENEMY_MAX_DIST - 14, dist + safetyShift - index * 2)
+    );
+  }
+
+  function getShardDistanceBounds(level = state.level) {
+    const stage = getStageForLevel(level);
+    const lateStageTighten = Math.max(0, stage - 2) * 28;
+    return {
+      minPlayerDist: SHARD_MIN_PLAYER_DIST,
+      maxPlayerDist: Math.max(390, SHARD_MAX_PLAYER_DIST - lateStageTighten),
+    };
+  }
+
+  function createRuntimeSeed() {
+    return normalizeSeed(Math.floor(Math.random() * 4294967295));
+  }
+
+  function makeLevelEnemyRng() {
+    const levelSalt = Math.imul(state.level + 37, 2654435761);
+    return createRng(mixSeed(state.runSeed, levelSalt));
+  }
+
+  function makeLevelShardRng() {
+    const levelSalt = Math.imul(state.level + 79, 1597334677);
+    return createRng(mixSeed(state.runSeed, levelSalt));
+  }
+
+  function pickEnemySpawn(rng, playerSpawn, existingEnemies, enemyRadius, totalEnemies) {
+    const minX = Math.max(ENEMY_SPAWN_MARGIN + enemyRadius, playerSpawn.x + ENEMY_MIN_X_FROM_PLAYER);
+    const maxX = world.width - ENEMY_SPAWN_MARGIN - enemyRadius;
+    const minY = ENEMY_SPAWN_MARGIN + enemyRadius;
+    const maxY = world.height - ENEMY_SPAWN_MARGIN - enemyRadius;
+
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      const candidate = {
+        x: randomBetween(rng, minX, maxX),
+        y: randomBetween(rng, minY, maxY),
+      };
+      const playerDist = Math.hypot(candidate.x - playerSpawn.x, candidate.y - playerSpawn.y);
+      if (playerDist < ENEMY_PLAYER_SAFE_DIST + enemyRadius + playerSpawn.r) continue;
+
+      const adaptiveGap = Math.max(72, ENEMY_MIN_GAP - Math.max(0, existingEnemies.length - 2) * 5);
+      const hasGap = existingEnemies.every((enemy) => Math.hypot(candidate.x - enemy.x, candidate.y - enemy.y) >= adaptiveGap);
+      if (!hasGap) continue;
+
+      const bucketIndex = angleBucket(candidate, playerSpawn);
+      const bucketCount = existingEnemies.reduce(
+        (count, enemy) => count + (angleBucket(enemy, playerSpawn) === bucketIndex ? 1 : 0),
+        0
+      );
+      const bucketLimit = totalEnemies <= ENEMY_ANGLE_BUCKETS ? 1 : 2;
+      if (bucketCount >= bucketLimit) continue;
+
+      return candidate;
+    }
+
+    // Fallback pass: keep safety distance + anti-cluster gap, but relax angle buckets
+    // to avoid deterministic fallback positions that can create unfair hard clusters.
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const candidate = {
+        x: randomBetween(rng, minX, maxX),
+        y: randomBetween(rng, minY, maxY),
+      };
+      const playerDist = Math.hypot(candidate.x - playerSpawn.x, candidate.y - playerSpawn.y);
+      if (playerDist < ENEMY_PLAYER_SAFE_DIST + enemyRadius + playerSpawn.r) continue;
+
+      const adaptiveGap = Math.max(70, ENEMY_MIN_GAP - Math.max(0, existingEnemies.length - 2) * 6);
+      const hasGap = existingEnemies.every((enemy) => Math.hypot(candidate.x - enemy.x, candidate.y - enemy.y) >= adaptiveGap);
+      if (!hasGap) continue;
+      return candidate;
+    }
+
+    return null;
   }
 
   function buildLevelEnemies() {
     const speedScale = getSpeedScale();
-    return BASE_ENEMIES.map((enemy) => ({
-      id: enemy.id,
-      x: enemy.x,
-      y: enemy.y,
-      vx: 0,
-      vy: 0,
-      r: enemy.r,
-      speed: Math.min(PLAYER_SPEED, Math.round(enemy.speed * speedScale * 100) / 100),
-      hp: enemy.hp,
-    }));
+    const rng = makeLevelEnemyRng();
+    const playerSpawn = makePlayer();
+    const enemyCount = getEnemyCountForLevel();
+    const spawned = [];
+
+    for (let index = 0; index < enemyCount; index += 1) {
+      const baseEnemy = ENEMY_ARCHETYPES[index % ENEMY_ARCHETYPES.length];
+      const tier = Math.floor(index / ENEMY_ARCHETYPES.length);
+      const fallbackAngle = (index / enemyCount) * Math.PI * 2;
+      const fallbackRadius = 34 + tier * 20;
+      const enemy = {
+        id: `E${index + 1}`,
+        fallbackX: Math.max(
+          baseEnemy.r,
+          Math.min(world.width - baseEnemy.r, baseEnemy.fallbackX + Math.cos(fallbackAngle) * fallbackRadius)
+        ),
+        fallbackY: Math.max(
+          baseEnemy.r,
+          Math.min(world.height - baseEnemy.r, baseEnemy.fallbackY + Math.sin(fallbackAngle) * fallbackRadius)
+        ),
+        r: baseEnemy.r,
+        speed: baseEnemy.speed * Math.max(0.82, 1 - tier * 0.08),
+        hp: Math.min(3, baseEnemy.hp + (tier > 0 ? 1 : 0)),
+      };
+      const point = pickEnemySpawn(rng, playerSpawn, spawned, enemy.r, enemyCount);
+      spawned.push({
+        id: enemy.id,
+        x: point ? point.x : enemy.fallbackX,
+        y: point ? point.y : enemy.fallbackY,
+        vx: 0,
+        vy: 0,
+        r: enemy.r,
+        speed: Math.min(PLAYER_SPEED, Math.round(enemy.speed * speedScale * 100) / 100),
+        hp: enemy.hp,
+      });
+    }
+
+    return spawned;
   }
 
-  function buildLevelShards() {
-    const pattern = SHARD_PATTERNS[(state.level - 1) % SHARD_PATTERNS.length];
-    return pattern.map((shard) => ({ ...shard }));
+  function nearestEnemyDistance(point, enemies) {
+    if (!enemies.length) return Infinity;
+    return enemies.reduce((min, enemy) => Math.min(min, Math.hypot(point.x - enemy.x, point.y - enemy.y)), Infinity);
+  }
+
+  function angleBucket(point, center, buckets = ENEMY_ANGLE_BUCKETS) {
+    const angle = Math.atan2(point.y - center.y, point.x - center.x);
+    const normalized = (angle + Math.PI) / (Math.PI * 2);
+    return Math.floor(normalized * buckets) % buckets;
+  }
+
+  function buildSpawnDiagnostics(player, enemies, shards) {
+    const playerEnemyMinDist = nearestEnemyDistance(player, enemies);
+    const enemyAngleBuckets = Array.from({ length: ENEMY_ANGLE_BUCKETS }, () => 0);
+    let enemyEnemyMinDist = Infinity;
+    let enemyPairSum = 0;
+    let enemyPairCount = 0;
+
+    for (let i = 0; i < enemies.length; i += 1) {
+      const enemy = enemies[i];
+      enemyAngleBuckets[angleBucket(enemy, player)] += 1;
+      for (let j = i + 1; j < enemies.length; j += 1) {
+        const pairDist = Math.hypot(enemy.x - enemies[j].x, enemy.y - enemies[j].y);
+        enemyEnemyMinDist = Math.min(enemyEnemyMinDist, pairDist);
+        enemyPairSum += pairDist;
+        enemyPairCount += 1;
+      }
+    }
+
+    let nearestShardToPlayer = Infinity;
+    let shardEnemyMinDist = Infinity;
+    for (const shard of shards) {
+      nearestShardToPlayer = Math.min(nearestShardToPlayer, Math.hypot(shard.x - player.x, shard.y - player.y));
+      shardEnemyMinDist = Math.min(shardEnemyMinDist, nearestEnemyDistance(shard, enemies));
+    }
+
+    return {
+      playerEnemyMinDist: Number((Number.isFinite(playerEnemyMinDist) ? playerEnemyMinDist : 0).toFixed(2)),
+      enemyEnemyMinDist: Number((Number.isFinite(enemyEnemyMinDist) ? enemyEnemyMinDist : 0).toFixed(2)),
+      enemySpread: Number((enemyPairCount > 0 ? enemyPairSum / enemyPairCount : 0).toFixed(2)),
+      nearestShardToPlayer: Number((Number.isFinite(nearestShardToPlayer) ? nearestShardToPlayer : 0).toFixed(2)),
+      shardEnemyMinDist: Number((Number.isFinite(shardEnemyMinDist) ? shardEnemyMinDist : 0).toFixed(2)),
+      enemyAngleBuckets,
+    };
+  }
+
+  function pickShardSpawn(rng, playerSpawn, enemies, existingShards, targetEnemyDist, distanceBounds) {
+    const minX = Math.max(SHARD_SPAWN_MARGIN, playerSpawn.x + SHARD_MIN_X_FROM_PLAYER);
+    const maxX = world.width - SHARD_SPAWN_MARGIN;
+    const minY = SHARD_SPAWN_MARGIN;
+    const maxY = world.height - SHARD_SPAWN_MARGIN;
+
+    let best = null;
+    for (let attempt = 0; attempt < 240; attempt += 1) {
+      const candidate = {
+        x: randomBetween(rng, minX, maxX),
+        y: randomBetween(rng, minY, maxY),
+      };
+      const playerDist = Math.hypot(candidate.x - playerSpawn.x, candidate.y - playerSpawn.y);
+      if (playerDist < distanceBounds.minPlayerDist || playerDist > distanceBounds.maxPlayerDist) continue;
+
+      const shardGapOk = existingShards.every((shard) => Math.hypot(candidate.x - shard.x, candidate.y - shard.y) >= SHARD_MIN_GAP);
+      if (!shardGapOk) continue;
+
+      const enemyDist = nearestEnemyDistance(candidate, enemies);
+      if (enemyDist < SHARD_ENEMY_MIN_DIST || enemyDist > SHARD_ENEMY_MAX_DIST) continue;
+
+      const candidateAngle = Math.atan2(candidate.y - playerSpawn.y, candidate.x - playerSpawn.x);
+      let anglePenalty = 0;
+      for (const shard of existingShards) {
+        const shardAngle = Math.atan2(shard.y - playerSpawn.y, shard.x - playerSpawn.x);
+        const angleDiff = smallestAngleDiff(candidateAngle, shardAngle);
+        if (angleDiff < SHARD_ANGLE_MIN_SEPARATION) {
+          anglePenalty += (SHARD_ANGLE_MIN_SEPARATION - angleDiff) * 120;
+        }
+      }
+
+      const score = Math.abs(enemyDist - targetEnemyDist) + Math.abs(playerDist - 250) * 0.22 + anglePenalty;
+      if (!best || score < best.score) {
+        best = { point: candidate, score };
+      }
+    }
+
+    return best ? best.point : null;
+  }
+
+  function buildLevelShards(enemies) {
+    const rng = makeLevelShardRng();
+    const playerSpawn = makePlayer();
+    const shards = [];
+    const riskTargets = getShardRiskTargets(state.level);
+    const distanceBounds = getShardDistanceBounds(state.level);
+
+    for (let i = 0; i < GOAL_SHARDS; i += 1) {
+      const targetEnemyDist = riskTargets[i % riskTargets.length];
+      const candidate = pickShardSpawn(rng, playerSpawn, enemies, shards, targetEnemyDist, distanceBounds);
+      if (!candidate) break;
+      const value = targetEnemyDist <= 110 ? 3 : targetEnemyDist <= 150 ? 2 : 1;
+      shards.push({ id: `S${i + 1}`, x: candidate.x, y: candidate.y, r: 8, value });
+    }
+
+    if (shards.length === GOAL_SHARDS) {
+      return shards;
+    }
+
+    const pattern = FALLBACK_SHARD_PATTERNS[(state.level - 1) % FALLBACK_SHARD_PATTERNS.length];
+    return pattern.map((shard, index) => ({ ...shard, value: Math.min(3, index + 1) }));
   }
 
   function spawnLevel(newRun) {
     state.score = 0;
     state.goal = GOAL_SHARDS;
+    state.sectorDamageTaken = 0;
     state.enemies = buildLevelEnemies();
-    state.shards = buildLevelShards();
+    state.shards = buildLevelShards(state.enemies);
     state.nearestEnemyDist = Infinity;
 
     if (newRun) {
@@ -161,12 +487,21 @@
     } else {
       state.player = makePlayer(MAX_PLAYER_HP);
     }
+    state.levelEntryShieldTotal = getEntryShieldDuration(state.level);
+    state.levelEntryShield = state.levelEntryShieldTotal;
+    state.spawnDiagnostics = buildSpawnDiagnostics(state.player, state.enemies, state.shards);
 
     state.levelBannerTimer = 1;
-    if (!newRun && (state.level === 2 || state.level % 10 === 0)) {
+    const currentStage = getStageForLevel(state.level);
+    const previousStage = getStageForLevel(Math.max(1, state.level - 1));
+    if (!newRun && currentStage > previousStage) {
       state.milestoneFlash = 1.8;
       state.milestoneLevel = state.level;
-      state.milestoneLabel = state.level === 2 ? "Checkpoint Sector 2" : `Milestone Sector ${state.level}`;
+      const drones = getEnemyCountForLevel(state.level);
+      const speed = getSpeedScale(state.level).toFixed(2);
+      const speedDelta = getStageSpeedDelta(state.level).toFixed(2);
+      const band = getPressureBand(state.level);
+      state.milestoneLabel = `Stage ${currentStage} ${band} · ${drones} Drones · x${speed} (Δ+${speedDelta})`;
     }
   }
 
@@ -195,7 +530,11 @@
 
   function setMenuVisualState(mode) {
     const bestSuffix = state.bestLevel > 1 ? ` Best sector: ${state.bestLevel}.` : "";
-    const summary = state.lastRun ? `Reached Sector ${state.lastRun.level} · ${state.lastRun.totalScore} shards · ${state.lastRun.elapsed.toFixed(1)}s` : "";
+    const bonusSuffix = state.lastRun && state.lastRun.stageBonusScore > 0 ? ` (Stage bonus +${state.lastRun.stageBonusScore})` : "";
+    const cleanSuffix = state.lastRun && state.lastRun.cleanSweepScore > 0 ? ` · Clean +${state.lastRun.cleanSweepScore}` : "";
+    const summary = state.lastRun
+      ? `Reached Sector ${state.lastRun.level} · ${state.lastRun.totalScore} pts${bonusSuffix}${cleanSuffix} · ${state.lastRun.elapsed.toFixed(1)}s`
+      : "";
     if (mode === "win") {
       menuPanel.dataset.state = "win";
       menuKicker.textContent = "Run Complete";
@@ -210,8 +549,26 @@
       menuTitle.textContent = "Hull Breach";
       if (state.lastRun) {
         const nextTarget = Math.min(state.maxLevel, Math.max(2, state.lastRun.level + 1));
-        const tip = state.lastRun.totalScore === 0 ? "Tip: pulse when drones stack on your lane." : "Tip: chain shards early, then pulse through pressure.";
-        menuSubtitle.textContent = `${summary}. Impacts taken: ${state.lastRun.damageTaken}. Next target: Sector ${nextTarget}. ${tip}${bestSuffix}`;
+        const tip =
+          state.lastRun.totalScore === 0
+            ? "Tip: route to the safer shard first, then pulse when two drones stack."
+            : "Tip: bank early shards, then pulse through pressure lanes.";
+        const pressure = `Stage ${state.lastRun.stage} ${getPressureBand(state.lastRun.level)}, ${state.lastRun.enemyCount} drones, speed x${state.lastRun.speedScale.toFixed(2)}`;
+        const causeLabel =
+          state.lastRun.damageTaken >= MAX_PLAYER_HP
+            ? "Sustained contact overload"
+            : state.lastRun.speedScale >= 1.4
+              ? "High-stage speed pressure"
+              : "Close collision during route switch";
+        const lastHit = state.lastRun.lastHitEnemyId ?? "Unknown";
+        const cleanTag = state.lastRun.cleanSweepScore > 0 ? ` · Clean +${state.lastRun.cleanSweepScore}` : "";
+        menuSubtitle.textContent =
+          `Reached Sector ${state.lastRun.level} · ${state.lastRun.totalScore} pts${cleanTag} · ${state.lastRun.elapsed.toFixed(1)}s${bestSuffix}\n` +
+          `Cause: ${causeLabel} (hits ${state.lastRun.damageTaken}, last ${lastHit})\n` +
+          `Pressure: ${pressure}\n` +
+          `Next target: Sector ${nextTarget}. ${tip}`;
+        startBtn.textContent = `Retry S${nextTarget}`;
+        return;
       } else {
         menuSubtitle.textContent = `Drone pressure broke the hull frame. Relaunch and retry.${bestSuffix}`;
       }
@@ -221,7 +578,7 @@
     menuPanel.dataset.state = "menu";
     menuKicker.textContent = "Mission Brief";
     menuTitle.textContent = "Orb Drift";
-    menuSubtitle.textContent = `Sweep 100 sectors. Threat rises every clear.${bestSuffix}`;
+    menuSubtitle.textContent = `Sweep 100 sectors. Every ${LEVELS_PER_STAGE} sectors: +enemy count and +drone speed.\nClean sector (no hits): +1 score.${bestSuffix}`;
     startBtn.textContent = "Launch";
   }
 
@@ -231,6 +588,10 @@
     state.totalScore = 0;
     state.elapsed = 0;
     state.damageTaken = 0;
+    state.stageBonusScore = 0;
+    state.cleanSweepScore = 0;
+    state.lastHitEnemyId = null;
+    state.runSeed = state.seedOverride ?? createRuntimeSeed();
     state.tutorialMoveHint = true;
     state.tutorialPulseHint = true;
     setMenuVisualState("menu");
@@ -244,9 +605,15 @@
     state.lastRun = {
       mode,
       level: state.level,
+      stage: getStageForLevel(state.level),
+      enemyCount: state.enemies.length,
+      speedScale: Number(getSpeedScale(state.level).toFixed(2)),
       totalScore: state.totalScore,
+      stageBonusScore: state.stageBonusScore,
+      cleanSweepScore: state.cleanSweepScore,
       elapsed: state.elapsed,
       damageTaken: state.damageTaken,
+      lastHitEnemyId: state.lastHitEnemyId,
     };
     state.mode = mode;
     setMenuVisualState(mode);
@@ -265,10 +632,10 @@
   function keyToDirection() {
     let dx = 0;
     let dy = 0;
-    if (keysDown.has("ArrowLeft")) dx -= 1;
-    if (keysDown.has("ArrowRight")) dx += 1;
-    if (keysDown.has("ArrowUp")) dy -= 1;
-    if (keysDown.has("ArrowDown")) dy += 1;
+    if (keysDown.has("ArrowLeft") || keysDown.has("KeyA")) dx -= 1;
+    if (keysDown.has("ArrowRight") || keysDown.has("KeyD")) dx += 1;
+    if (keysDown.has("ArrowUp") || keysDown.has("KeyW")) dy -= 1;
+    if (keysDown.has("ArrowDown") || keysDown.has("KeyS")) dy += 1;
 
     if (dx !== 0 || dy !== 0) {
       const len = Math.hypot(dx, dy);
@@ -305,10 +672,37 @@
     state.enemies = state.enemies.filter((enemy) => enemy.hp > 0);
   }
 
+  function handleSectorClear() {
+    if (state.sectorDamageTaken === 0) {
+      state.totalScore += 1;
+      state.cleanSweepScore += 1;
+      state.pickupBursts.push({ x: state.player.x, y: Math.max(42, state.player.y - 28), value: 1, label: "Clean +1", timer: 0.72 });
+    }
+    state.clearFlash = 0.52;
+    state.clearLevel = state.level;
+    if (state.level % LEVELS_PER_STAGE === 0) {
+      const clearedStage = getStageForLevel(state.level);
+      const bonusPoints = 2 + clearedStage;
+      state.totalScore += bonusPoints;
+      state.stageBonusScore += bonusPoints;
+      state.stageBonusFlash = 1.3;
+      state.stageBonusDelay = 0.55;
+      state.stageBonusPoints = bonusPoints;
+      state.stageBonusStage = clearedStage;
+    }
+    if (state.level >= state.maxLevel) {
+      endRun("win");
+    } else {
+      state.level += 1;
+      spawnLevel(false);
+    }
+  }
+
   function updatePlaying(dt) {
     const player = state.player;
     state.elapsed += dt;
     state.levelBannerTimer = Math.max(0, state.levelBannerTimer - dt);
+    state.levelEntryShield = Math.max(0, state.levelEntryShield - dt);
     player.invuln = Math.max(0, player.invuln - dt);
     player.pulseTimer = Math.max(0, player.pulseTimer - dt);
     player.pulseCooldown = Math.max(0, player.pulseCooldown - dt);
@@ -348,9 +742,11 @@
       clampEntity(enemy);
 
       const collisionDist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
-      if (collisionDist <= enemy.r + player.r && player.invuln <= 0) {
+      if (collisionDist <= enemy.r + player.r && player.invuln <= 0 && state.levelEntryShield <= 0) {
         player.hp -= 1;
         state.damageTaken += 1;
+        state.sectorDamageTaken += 1;
+        state.lastHitEnemyId = enemy.id;
         player.invuln = 0.95;
         state.damageFlash = 0.22;
       }
@@ -360,23 +756,17 @@
     state.shards = state.shards.filter((shard) => {
       const dist = Math.hypot(shard.x - player.x, shard.y - player.y);
       if (dist <= shard.r + player.r) {
+        const value = shard.value ?? 1;
         state.score += 1;
-        state.totalScore += 1;
-        state.pickupBursts.push({ x: shard.x, y: shard.y, timer: 0.46 });
+        state.totalScore += value;
+        state.pickupBursts.push({ x: shard.x, y: shard.y, value, timer: 0.46 });
         return false;
       }
       return true;
     });
 
     if (state.score >= state.goal) {
-      state.clearFlash = 0.52;
-      state.clearLevel = state.level;
-      if (state.level >= state.maxLevel) {
-        endRun("win");
-      } else {
-        state.level += 1;
-        spawnLevel(false);
-      }
+      handleSectorClear();
       return;
     }
 
@@ -388,6 +778,10 @@
   function update(dt) {
     state.damageFlash = Math.max(0, state.damageFlash - dt);
     state.clearFlash = Math.max(0, state.clearFlash - dt);
+    state.stageBonusDelay = Math.max(0, state.stageBonusDelay - dt);
+    if (state.stageBonusDelay <= 0 && state.milestoneFlash <= 0) {
+      state.stageBonusFlash = Math.max(0, state.stageBonusFlash - dt);
+    }
     state.milestoneFlash = Math.max(0, state.milestoneFlash - dt);
     state.launchFlash = Math.max(0, state.launchFlash - dt);
     state.pickupBursts = state.pickupBursts
@@ -475,12 +869,19 @@
   function drawShards() {
     const t = performance.now() * 0.001;
     for (const shard of state.shards) {
+      const value = shard.value ?? 1;
+      const styleByValue =
+        value >= 3
+          ? { fill: "#ff9e67", glow: "rgba(255, 167, 118, 0.82)", core: "rgba(255, 247, 222, 0.9)" }
+          : value === 2
+            ? { fill: "#ffd16b", glow: "rgba(255, 218, 135, 0.78)", core: "rgba(255, 250, 231, 0.9)" }
+            : { fill: "#34d8ff", glow: "rgba(74, 213, 255, 0.7)", core: "rgba(244, 255, 255, 0.82)" };
       ctx.save();
       ctx.translate(shard.x, shard.y);
       ctx.rotate(t * 0.9);
-      ctx.shadowColor = "rgba(74, 213, 255, 0.7)";
+      ctx.shadowColor = styleByValue.glow;
       ctx.shadowBlur = 18;
-      ctx.fillStyle = "#34d8ff";
+      ctx.fillStyle = styleByValue.fill;
       ctx.beginPath();
       ctx.moveTo(0, -12);
       ctx.lineTo(11, 0);
@@ -489,11 +890,32 @@
       ctx.closePath();
       ctx.fill();
 
-      ctx.fillStyle = "rgba(244, 255, 255, 0.82)";
+      ctx.fillStyle = styleByValue.core;
       ctx.beginPath();
       ctx.arc(0, 0, 3.2, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
+
+      ctx.fillStyle = "rgba(8, 31, 58, 0.92)";
+      ctx.font = value >= 3 ? "800 13px 'Avenir Next', 'Trebuchet MS', sans-serif" : "800 12px 'Avenir Next', 'Trebuchet MS', sans-serif";
+      ctx.textAlign = "center";
+      ctx.strokeStyle = "rgba(8, 28, 52, 0.88)";
+      ctx.lineWidth = 3.2;
+      ctx.strokeText(String(value), shard.x, shard.y + 4);
+      ctx.fillStyle = value >= 3 ? "rgba(255, 244, 225, 0.98)" : value === 2 ? "rgba(255, 247, 228, 0.96)" : "rgba(231, 252, 255, 0.96)";
+      ctx.fillText(String(value), shard.x, shard.y + 4);
+
+      if (value >= 3) {
+        const pulse = (Math.sin(t * 7 + shard.x * 0.02 + shard.y * 0.02) + 1) * 0.5;
+        ctx.save();
+        ctx.strokeStyle = `rgba(255, 184, 125, ${0.32 + pulse * 0.32})`;
+        ctx.lineWidth = 1.9;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.arc(shard.x, shard.y, 17.5 + pulse * 2.8, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
   }
 
@@ -553,6 +975,16 @@
       ctx.lineWidth = 1.3;
       ctx.beginPath();
       ctx.arc(player.x, player.y, player.r - 5, -0.5, 0.8);
+      ctx.stroke();
+    }
+
+    if (state.levelEntryShield > 0) {
+      const shieldBase = Math.max(0.01, state.levelEntryShieldTotal || LEVEL_ENTRY_GRACE);
+      const shieldRatio = Math.min(1, state.levelEntryShield / shieldBase);
+      ctx.strokeStyle = `rgba(140, 255, 230, ${0.28 + shieldRatio * 0.36})`;
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r + 11 + shieldRatio * 6, 0, Math.PI * 2);
       ctx.stroke();
     }
 
@@ -637,7 +1069,12 @@
       { label: "HP", value: `${player.hp}/${MAX_PLAYER_HP}`, width: 122, accent: hpAccent },
       { label: "LEVEL", value: `${state.level}/${state.maxLevel}`, width: 166, accent: "rgba(99, 175, 255, 0.92)" },
       { label: "SHARDS", value: `${state.score}/${state.goal}`, width: 152, accent: "rgba(95, 241, 227, 0.9)" },
-      { label: "THREAT", value: `x${getSpeedScale().toFixed(2)}`, width: 152, accent: "rgba(255, 188, 112, 0.92)" },
+      {
+        label: "THREAT / DRONES",
+        value: `x${getSpeedScale().toFixed(2)} · ${state.enemies.length}`,
+        width: 178,
+        accent: "rgba(255, 188, 112, 0.92)",
+      },
     ];
 
     let x = baseX;
@@ -681,10 +1118,15 @@
 
     ctx.font = "700 11px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.fillStyle = "rgba(236, 248, 255, 0.98)";
-    ctx.fillText(`TOTAL SHARDS ${state.totalScore}`, baseX + 4, baseY + 72);
+    ctx.fillText(`TOTAL SCORE ${state.totalScore}`, baseX + 4, baseY + 72);
+    ctx.fillStyle = "rgba(191, 231, 249, 0.95)";
+    ctx.fillText(`CLEAN SWEEP +${state.cleanSweepScore}`, baseX + 4, baseY + 88);
+    ctx.fillStyle = "rgba(196, 232, 250, 0.93)";
+    ctx.fillText("VALUE LEGEND 1 COOL · 2 WARM · 3 HOT", baseX + 176, baseY + 88);
 
+    const stage = getStageForLevel(state.level);
     const nextMilestone = getNextMilestoneLevel(state.level);
-    const sectorsToMilestone = Math.max(0, nextMilestone - state.level);
+    const levelsToNextStage = getLevelsToNextStage(state.level);
     drawRoundedPanel(baseX + 176, baseY + 59, 248, 16, 6);
     ctx.fillStyle = "rgba(8, 28, 50, 0.46)";
     ctx.fill();
@@ -692,13 +1134,18 @@
     ctx.lineWidth = 1;
     ctx.stroke();
     ctx.fillStyle = "rgba(149, 240, 255, 0.98)";
-    ctx.fillText(`MILESTONE S${nextMilestone} · ${sectorsToMilestone} TO GO`, baseX + 184, baseY + 72);
+    const stageText =
+      state.level >= state.maxLevel
+        ? `STAGE ${stage} ${getPressureBand(state.level)} · FINAL SECTOR`
+        : `STAGE ${stage} ${getPressureBand(state.level)} · NEXT @ S${nextMilestone} (${levelsToNextStage} TO GO)`;
+    ctx.fillText(stageText, baseX + 184, baseY + 72);
 
     const remainingShards = Math.max(0, state.goal - state.score);
+    const cleanActive = state.sectorDamageTaken === 0;
     const objectiveX = 16;
-    const objectiveY = world.height - 52;
+    const objectiveY = world.height - 62;
     const objectiveW = 420;
-    const objectiveH = 30;
+    const objectiveH = 40;
     ctx.fillStyle = "rgba(9, 25, 48, 0.55)";
     drawRoundedPanel(objectiveX, objectiveY, objectiveW, objectiveH, 10);
     ctx.fill();
@@ -718,7 +1165,17 @@
     ctx.fillStyle = "#edf8ff";
     ctx.font = "700 12px 'Avenir Next', 'Trebuchet MS', sans-serif";
     ctx.textAlign = "left";
-    ctx.fillText(`Objective: collect ${remainingShards} more shard${remainingShards === 1 ? "" : "s"} to clear this sector`, objectiveX + 10, objectiveY + 19);
+    ctx.fillText(`Objective: ${remainingShards} shard${remainingShards === 1 ? "" : "s"} to clear sector`, objectiveX + 10, objectiveY + 16);
+    ctx.fillStyle = cleanActive ? "rgba(180, 248, 228, 0.98)" : "rgba(255, 195, 156, 0.94)";
+    ctx.font = "700 11px 'Avenir Next', 'Trebuchet MS', sans-serif";
+    ctx.fillText(cleanActive ? "Clean bonus armed (+1)" : "Clean bonus lost this sector", objectiveX + 10, objectiveY + 31);
+
+    if (state.levelEntryShield > 0) {
+      ctx.textAlign = "right";
+      ctx.fillStyle = "rgba(164, 248, 232, 0.98)";
+      ctx.fillText(`Entry Shield ${state.levelEntryShield.toFixed(1)}s`, objectiveX + objectiveW - 10, objectiveY + 16);
+    }
+    ctx.textAlign = "left";
 
     if (state.nearestEnemyDist < 165) {
       const warningX = world.width - 282;
@@ -754,7 +1211,7 @@
 
       ctx.font = "700 15px 'Avenir Next', 'Trebuchet MS', sans-serif";
       ctx.fillStyle = "rgba(206, 233, 255, 0.92)";
-      ctx.fillText("Press P / A to resume", world.width / 2, world.height / 2 + 28);
+      ctx.fillText("Press P to resume", world.width / 2, world.height / 2 + 28);
     }
 
     if (state.mode === "playing" && state.levelBannerTimer > 0) {
@@ -850,6 +1307,11 @@
   }
 
   function drawFeedbackLayers() {
+    const showMilestone = state.milestoneFlash > 0;
+    const showStageBonus = !showMilestone && state.stageBonusFlash > 0 && state.stageBonusDelay <= 0;
+    const showClearText = state.clearFlash > 0 && !showMilestone && !showStageBonus;
+    const hasStagePriorityOverlay = showMilestone || showStageBonus || showClearText;
+
     if (state.damageFlash <= 0) {
       // continue for pickup bursts
     } else {
@@ -878,10 +1340,12 @@
       ctx.fillStyle = `rgba(221, 251, 255, ${alpha})`;
       ctx.font = "700 14px 'Avenir Next', 'Trebuchet MS', sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText("+1", burst.x, burst.y - 24 - (1 - ratio) * 16);
+      const bonus = burst.value ?? 1;
+      const label = burst.label ?? `+${bonus}`;
+      ctx.fillText(label, burst.x, burst.y - 24 - (1 - ratio) * 16);
     }
 
-    if (state.clearFlash > 0) {
+    if (showClearText) {
       const ratio = state.clearFlash / 0.52;
       const alpha = Math.min(0.24, ratio * 0.24);
       const sweep = ctx.createLinearGradient(0, 0, world.width, world.height);
@@ -894,9 +1358,31 @@
       ctx.font = "700 28px 'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif";
       ctx.textAlign = "center";
       ctx.fillText(`Sector ${state.clearLevel} Cleared`, world.width / 2, world.height * 0.42);
+    } else if (state.clearFlash > 0) {
+      const ratio = state.clearFlash / 0.52;
+      const alpha = Math.min(0.08, ratio * 0.08);
+      const sweep = ctx.createLinearGradient(0, 0, world.width, world.height);
+      sweep.addColorStop(0, `rgba(96, 247, 220, ${alpha})`);
+      sweep.addColorStop(1, `rgba(113, 200, 255, ${alpha * 0.8})`);
+      ctx.fillStyle = sweep;
+      ctx.fillRect(0, 0, world.width, world.height);
     }
 
-    if (state.milestoneFlash > 0) {
+    if (showStageBonus) {
+      const ratio = state.stageBonusFlash / 1.3;
+      drawRoundedPanel(world.width / 2 - 176, world.height * 0.47, 352, 48, 12);
+      ctx.fillStyle = `rgba(29, 47, 27, ${0.42 * ratio})`;
+      ctx.fill();
+      ctx.strokeStyle = `rgba(148, 246, 146, ${0.64 * ratio})`;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      ctx.fillStyle = `rgba(227, 255, 213, ${Math.min(1, ratio * 1.1)})`;
+      ctx.font = "700 22px 'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(`Stage ${state.stageBonusStage} Bonus +${state.stageBonusPoints}`, world.width / 2, world.height * 0.47 + 31);
+    }
+
+    if (showMilestone) {
       const ratio = state.milestoneFlash / 1.8;
       ctx.fillStyle = `rgba(255, 215, 128, ${0.1 * ratio})`;
       ctx.fillRect(0, 0, world.width, world.height);
@@ -906,7 +1392,7 @@
       ctx.fillText(state.milestoneLabel || `Milestone Sector ${state.milestoneLevel}`, world.width / 2, world.height * 0.33);
     }
 
-    if (state.mode === "playing" && state.launchFlash > 0) {
+    if (state.mode === "playing" && state.launchFlash > 0 && !hasStagePriorityOverlay) {
       const ratio = state.launchFlash / 0.95;
       const alpha = Math.min(1, ratio * 1.2);
       const sweep = ctx.createLinearGradient(0, 0, world.width, 0);
@@ -933,13 +1419,16 @@
       ctx.fillText(`Collect ${state.goal} shards to clear Sector ${state.level}`, world.width / 2, world.height * 0.37 + 26);
     }
 
-    if (state.mode === "playing" && state.level === 1 && state.elapsed < 14 && state.nearestEnemyDist >= 165) {
+    if (state.mode === "playing" && state.level === 1 && state.elapsed < 14 && state.nearestEnemyDist >= 165 && !hasStagePriorityOverlay) {
       const tips = [];
       if (state.tutorialMoveHint) {
-        tips.push(hasTouchUi() ? "Use D-pad to drift through shards" : "Use Arrow keys to drift through shards");
+        tips.push(hasTouchUi() ? "Use D-pad to drift through shards" : "Use Arrow keys or WASD to drift through shards");
       }
       if (state.tutorialPulseHint) {
         tips.push(hasTouchUi() ? "Tap PULSE when drones close in" : "Press Space when drones close in");
+      }
+      if (state.totalScore === 0) {
+        tips.push("Warmer shards are worth more score");
       }
       if (tips.length > 0) {
         const boxW = 342;
@@ -1016,7 +1505,7 @@
   }
 
   function handleGameplayHotkeys(code) {
-    if (code === "KeyP" || code === "KeyA") {
+    if (code === "KeyP") {
       if (state.mode === "playing") {
         state.mode = "paused";
       } else if (state.mode === "paused") {
@@ -1025,15 +1514,20 @@
       syncTouchControls();
     }
 
-    if (
-      (code === "KeyR" || code === "KeyB") &&
-      (state.mode === "playing" || state.mode === "paused" || state.mode === "win" || state.mode === "lose")
-    ) {
+    if (code === "KeyR" && (state.mode === "playing" || state.mode === "paused" || state.mode === "win" || state.mode === "lose")) {
       startGame();
     }
 
     if (code === "Enter" && (state.mode === "menu" || state.mode === "win" || state.mode === "lose")) {
       startGame();
+    }
+  }
+
+  function clearInputState() {
+    keysDown.clear();
+    pressedThisFrame.clear();
+    for (const button of touchButtons) {
+      button.classList.remove("active");
     }
   }
 
@@ -1053,13 +1547,25 @@
 
     handleGameplayHotkeys(event.code);
 
-    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(event.code)) {
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyW", "KeyA", "KeyS", "KeyD", "Space"].includes(event.code)) {
       event.preventDefault();
     }
   });
 
   window.addEventListener("keyup", (event) => {
     keysDown.delete(event.code);
+  });
+
+  window.addEventListener("blur", clearInputState);
+  window.addEventListener("pointerup", () => {
+    for (const button of touchButtons) {
+      button.classList.remove("active");
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") {
+      clearInputState();
+    }
   });
 
   window.addEventListener("resize", () => {
@@ -1141,6 +1647,13 @@
       world: { width: world.width, height: world.height },
       level: state.level,
       maxLevel: state.maxLevel,
+      stage: getStageForLevel(state.level),
+      pressureBand: getPressureBand(state.level),
+      levelsPerStage: LEVELS_PER_STAGE,
+      levelsToNextStage: getLevelsToNextStage(state.level),
+      enemyCountTarget: getEnemyCountForLevel(state.level),
+      runSeed: state.runSeed,
+      seedLocked: state.seedOverride !== null,
       enemySpeedScale: Number(getSpeedScale().toFixed(2)),
       player: {
         x: Number(state.player.x.toFixed(2)),
@@ -1168,13 +1681,36 @@
         x: Number(shard.x.toFixed(2)),
         y: Number(shard.y.toFixed(2)),
         r: shard.r,
+        value: shard.value ?? 1,
       })),
       score: state.score,
       totalScore: state.totalScore,
+      stageBonusScore: state.stageBonusScore,
+      cleanSweepScore: state.cleanSweepScore,
+      sectorDamageTaken: state.sectorDamageTaken,
       goal: state.goal,
       elapsed: Number(state.elapsed.toFixed(2)),
+      levelEntryShield: Number(state.levelEntryShield.toFixed(2)),
+      levelEntryShieldTotal: Number(state.levelEntryShieldTotal.toFixed(2)),
+      spawnDiagnostics: state.spawnDiagnostics,
       fullscreen: Boolean(document.fullscreenElement),
       paused: state.mode === "paused",
+      lastHitEnemyId: state.lastHitEnemyId,
+      lastRun: state.lastRun
+        ? {
+            mode: state.lastRun.mode,
+            level: state.lastRun.level,
+            stage: state.lastRun.stage,
+            enemyCount: state.lastRun.enemyCount,
+            speedScale: state.lastRun.speedScale,
+            totalScore: state.lastRun.totalScore,
+            stageBonusScore: state.lastRun.stageBonusScore,
+            cleanSweepScore: state.lastRun.cleanSweepScore ?? 0,
+            elapsed: Number(state.lastRun.elapsed.toFixed(2)),
+            damageTaken: state.lastRun.damageTaken,
+            lastHitEnemyId: state.lastRun.lastHitEnemyId,
+          }
+        : null,
     };
 
     return JSON.stringify(payload);
@@ -1183,6 +1719,15 @@
   window.render_game_to_text = renderGameToText;
   window.advanceTime = advanceTime;
   window.orbDriftDebug = {
+    setSeed: (seed) => {
+      state.seedOverride = normalizeSeed(Number(seed));
+      return state.seedOverride;
+    },
+    clearSeed: () => {
+      state.seedOverride = null;
+      return true;
+    },
+    getSeed: () => state.runSeed,
     forceWin: () => endRun("win"),
     forceLose: () => endRun("lose"),
     setPlayerHp: (hp) => {
@@ -1193,6 +1738,17 @@
       if (state.mode !== "playing" && state.mode !== "paused") return;
       state.level = Math.max(1, Math.min(state.maxLevel, Math.round(Number(level) || 1)));
       spawnLevel(false);
+    },
+    forceClearSector: () => {
+      if (state.mode !== "playing" && state.mode !== "paused") return null;
+      state.score = state.goal;
+      handleSectorClear();
+      return {
+        level: state.level,
+        totalScore: state.totalScore,
+        stageBonusScore: state.stageBonusScore,
+        cleanSweepScore: state.cleanSweepScore,
+      };
     },
   };
 

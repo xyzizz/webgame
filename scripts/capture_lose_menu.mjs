@@ -9,7 +9,11 @@ const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
 await page.goto('http://127.0.0.1:5173', { waitUntil: 'networkidle' });
 await page.click('#start-btn');
-await page.waitForTimeout(5600);
+await page.waitForFunction(() => {
+  const payload = JSON.parse(window.render_game_to_text());
+  return payload.mode === 'lose';
+}, { timeout: 14000 });
+await page.waitForTimeout(120);
 
 const subtitle = await page.textContent('#menu-subtitle');
 await fs.promises.writeFile(`${outDir}/subtitle.txt`, String(subtitle || '').trim());

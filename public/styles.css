@@ -195,6 +195,12 @@ body::after {
   line-height: 1.45;
   max-width: 32ch;
   font-size: 0.95rem;
+  white-space: pre-line;
+}
+
+.menu-panel[data-state="lose"] .menu-subtitle {
+  font-size: 0.88rem;
+  line-height: 1.38;
 }
 
 .brief-grid {
@@ -398,6 +404,11 @@ kbd {
 
   .menu-subtitle {
     max-width: none;
+  }
+
+  .menu-panel[data-state="lose"] .menu-subtitle {
+    font-size: 0.84rem;
+    line-height: 1.34;
   }
 }
 
